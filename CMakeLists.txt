@@ -13,6 +13,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(STRATA_NATIVE "Tune for the host CPU (-march=native on x86-64)" ON)
+option(STRATA_AVX2 "When STRATA_NATIVE is OFF on x86-64, still build the AVX2+FMA kernels (portable to any AVX2 CPU)" ON)
 option(STRATA_BUILD_TESTS "Build C++ unit tests" ON)
 option(STRATA_BUILD_SERVER "Build the HTTP server" ON)
 option(STRATA_BUILD_BENCH "Build C++ micro-benchmarks" ON)
@@ -43,8 +44,13 @@ target_link_libraries(strata PUBLIC nlohmann_json::nlohmann_json Threads::Thread
 set_target_properties(strata PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(strata PRIVATE -Wall -Wextra -Wpedantic)
 
-if(STRATA_NATIVE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-  target_compile_options(strata PUBLIC -march=native)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  if(STRATA_NATIVE)
+    target_compile_options(strata PUBLIC -march=native)
+  elseif(STRATA_AVX2)
+    # Docker images / wheels: the build machine may not be the machine that runs the code.
+    target_compile_options(strata PUBLIC -mavx2 -mfma)
+  endif()
 endif()
 
 if(STRATA_SANITIZE)
