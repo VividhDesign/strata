@@ -43,9 +43,10 @@ Design write-up: **[docs/DESIGN.md](docs/DESIGN.md)**. It explains every decisio
 ```bash
 git clone https://github.com/VividhDesign/strata && cd strata
 pip install .                      # builds the C++ extension (needs CMake ≥ 3.20 and a C++17 compiler)
-# Docker / cloud images: build portable AVX2 code instead of tuning for the build machine
-pip install . --config-settings=cmake.define.STRATA_NATIVE=OFF
 ```
+
+`pip` builds are portable (AVX2 on x86-64, NEON on ARM). Direct CMake builds add `-march=native`; pass
+`-DSTRATA_NATIVE=OFF` to disable that.
 
 ```python
 import numpy as np, strata

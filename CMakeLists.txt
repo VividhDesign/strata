@@ -12,7 +12,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-option(STRATA_NATIVE "Tune for the host CPU (-march=native on x86-64)" ON)
+# pip/scikit-build builds produce packages that may run on other machines (cloud, Docker),
+# so they default to portable code; direct CMake builds tune for the host CPU.
+if(DEFINED SKBUILD)
+  set(_strata_native_default OFF)
+else()
+  set(_strata_native_default ON)
+endif()
+option(STRATA_NATIVE "Tune for the host CPU (-march=native on x86-64)" ${_strata_native_default})
 option(STRATA_AVX2 "When STRATA_NATIVE is OFF on x86-64, still build the AVX2+FMA kernels (portable to any AVX2 CPU)" ON)
 option(STRATA_BUILD_TESTS "Build C++ unit tests" ON)
 option(STRATA_BUILD_SERVER "Build the HTTP server" ON)
