@@ -4,6 +4,9 @@
 parallel lock-light graph construction, metadata filtering, write-ahead-log durability, a REST server and
 Python bindings. On 1M-vector benchmarks it matches FAISS and runs ~2× faster than hnswlib, at the same recall.
 
+**[Live demo](https://evident-rag.streamlit.app)**: open the *Vector DB playground* tab to search 57,638 documents with
+Strata, compare against exact search, and sweep `ef` to see the accuracy/speed trade-off.
+
 ```
 1M SIFT vectors · Apple M5 Pro
   build                 20.5 s on 15 threads (9.6× faster than 1 thread)
