@@ -1,0 +1,44 @@
+sift: base=(1000000, 128) queries=(10000, 128) metric=l2
+[strata] build 20.5s, index 642 MiB
+  ef=  10  recall@10=0.7080  qps=    47147
+  ef=  16  recall@10=0.8008  qps=    35160
+  ef=  24  recall@10=0.8644  qps=    26361
+  ef=  32  recall@10=0.9028  qps=    21265
+  ef=  48  recall@10=0.9432  qps=    15609
+  ef=  64  recall@10=0.9630  qps=    12279
+  ef=  96  recall@10=0.9813  qps=     8762
+  ef= 128  recall@10=0.9892  qps=     6857
+  ef= 192  recall@10=0.9952  qps=     4862
+  ef= 256  recall@10=0.9973  qps=     3829
+  ef= 384  recall@10=0.9987  qps=     2712
+  ef= 512  recall@10=0.9991  qps=     2121
+  all-core batch @ef=64: 115682 qps (recall 0.9630)
+[hnswlib] build 38.5s, index 630 MiB
+  ef=  10  recall@10=0.7089  qps=    22654
+  ef=  16  recall@10=0.8002  qps=    17248
+  ef=  24  recall@10=0.8652  qps=    13190
+  ef=  32  recall@10=0.9039  qps=    10770
+  ef=  48  recall@10=0.9431  qps=     7851
+  ef=  64  recall@10=0.9636  qps=     6283
+  ef=  96  recall@10=0.9814  qps=     4505
+  ef= 128  recall@10=0.9894  qps=     3561
+  ef= 192  recall@10=0.9952  qps=     2542
+  ef= 256  recall@10=0.9973  qps=     1999
+  ef= 384  recall@10=0.9986  qps=     1425
+  ef= 512  recall@10=0.9990  qps=     1122
+  all-core batch @ef=64: 54568 qps (recall 0.9636)
+[faiss] build 21.3s, index 626 MiB
+  ef=  10  recall@10=0.7157  qps=    46424
+  ef=  16  recall@10=0.8076  qps=    34395
+  ef=  24  recall@10=0.8736  qps=    25728
+  ef=  32  recall@10=0.9108  qps=    20868
+  ef=  48  recall@10=0.9486  qps=    14744
+  ef=  64  recall@10=0.9676  qps=    11238
+  ef=  96  recall@10=0.9835  qps=     7691
+  ef= 128  recall@10=0.9904  qps=     5836
+  ef= 192  recall@10=0.9954  qps=     3974
+  ef= 256  recall@10=0.9973  qps=     3001
+  ef= 384  recall@10=0.9987  qps=     1999
+  ef= 512  recall@10=0.9990  qps=     1489
+  all-core batch @ef=64: 113056 qps (recall 0.9676)
+wrote /Users/vividhyadav/Projects/strata/bench/results/sift.json

@@ -1,0 +1,44 @@
+{
+  "n": 200000,
+  "dim": 128,
+  "M": 16,
+  "ef_construction": 200,
+  "rows": [
+    {
+      "threads": 1,
+      "seconds": 24.838873374974355,
+      "inserts_per_sec": 8051.894986569877,
+      "recall_ef64": 0.9813000000000001
+    },
+    {
+      "threads": 2,
+      "seconds": 13.169799750030506,
+      "inserts_per_sec": 15186.25976067227,
+      "recall_ef64": 0.9812000000000001
+    },
+    {
+      "threads": 4,
+      "seconds": 6.878739999956451,
+      "inserts_per_sec": 29075.092240914204,
+      "recall_ef64": 0.981
+    },
+    {
+      "threads": 8,
+      "seconds": 4.178258583007846,
+      "inserts_per_sec": 47866.83160620087,
+      "recall_ef64": 0.9811000000000001
+    },
+    {
+      "threads": 12,
+      "seconds": 3.041484374960419,
+      "inserts_per_sec": 65757.36559639659,
+      "recall_ef64": 0.9811000000000001
+    },
+    {
+      "threads": 15,
+      "seconds": 2.581248291011434,
+      "inserts_per_sec": 77481.8914927522,
+      "recall_ef64": 0.9812000000000001
+    }
+  ]
+}

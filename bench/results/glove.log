@@ -1,0 +1,44 @@
+glove: base=(1183514, 100) queries=(10000, 100) metric=cosine
+[strata] build 28.9s, index 634 MiB
+  ef=  10  recall@10=0.4721  qps=    42737
+  ef=  16  recall@10=0.5569  qps=    31279
+  ef=  24  recall@10=0.6247  qps=    23342
+  ef=  32  recall@10=0.6704  qps=    18714
+  ef=  48  recall@10=0.7271  qps=    13751
+  ef=  64  recall@10=0.7624  qps=    10919
+  ef=  96  recall@10=0.8058  qps=     7838
+  ef= 128  recall@10=0.8317  qps=     6180
+  ef= 192  recall@10=0.8638  qps=     4400
+  ef= 256  recall@10=0.8843  qps=     3433
+  ef= 384  recall@10=0.9102  qps=     2385
+  ef= 512  recall@10=0.9260  qps=     1838
+  all-core batch @ef=64: 107396 qps (recall 0.7624)
+[hnswlib] build 52.5s, index 619 MiB
+  ef=  10  recall@10=0.4788  qps=    25565
+  ef=  16  recall@10=0.5617  qps=    18884
+  ef=  24  recall@10=0.6283  qps=    14174
+  ef=  32  recall@10=0.6723  qps=    11585
+  ef=  48  recall@10=0.7278  qps=     8524
+  ef=  64  recall@10=0.7627  qps=     6801
+  ef=  96  recall@10=0.8059  qps=     4938
+  ef= 128  recall@10=0.8324  qps=     3888
+  ef= 192  recall@10=0.8639  qps=     2756
+  ef= 256  recall@10=0.8849  qps=     2150
+  ef= 384  recall@10=0.9100  qps=     1518
+  ef= 512  recall@10=0.9259  qps=     1183
+  all-core batch @ef=64: 61072 qps (recall 0.7627)
+[faiss] build 30.1s, index 614 MiB
+  ef=  10  recall@10=0.4760  qps=    41891
+  ef=  16  recall@10=0.5630  qps=    30031
+  ef=  24  recall@10=0.6313  qps=    22374
+  ef=  32  recall@10=0.6751  qps=    18070
+  ef=  48  recall@10=0.7313  qps=    12971
+  ef=  64  recall@10=0.7637  qps=     9972
+  ef=  96  recall@10=0.8063  qps=     6922
+  ef= 128  recall@10=0.8324  qps=     5312
+  ef= 192  recall@10=0.8628  qps=     3655
+  ef= 256  recall@10=0.8824  qps=     2767
+  ef= 384  recall@10=0.9068  qps=     1855
+  ef= 512  recall@10=0.9213  qps=     1376
+  all-core batch @ef=64: 99055 qps (recall 0.7637)
+wrote /Users/vividhyadav/Projects/strata/bench/results/glove.json

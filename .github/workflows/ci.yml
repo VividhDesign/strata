@@ -1,0 +1,30 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: pip install cmake ninja
+      - name: Build and run C++ tests
+        run: |
+          cmake -S . -B build -G Ninja -DSTRATA_BUILD_SERVER=ON
+          cmake --build build
+          ./build/strata_tests
+      - name: ThreadSanitizer
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSTRATA_SANITIZE=thread -DSTRATA_BUILD_SERVER=OFF
+          cmake --build build-tsan
+          ./build-tsan/strata_tests
+      - name: Python package and tests
+        run: |
+          pip install ".[test]"
+          pytest -q

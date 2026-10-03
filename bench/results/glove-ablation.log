@@ -1,0 +1,16 @@
+glove: base=(1183514, 100) queries=(10000, 100) metric=cosine
+[strata-noheuristic] build 24.7s, index 634 MiB
+  ef=  10  recall@10=0.3553  qps=    47438
+  ef=  16  recall@10=0.4295  qps=    35693
+  ef=  24  recall@10=0.4977  qps=    26453
+  ef=  32  recall@10=0.5468  qps=    21819
+  ef=  48  recall@10=0.6150  qps=    15615
+  ef=  64  recall@10=0.6620  qps=    12298
+  ef=  96  recall@10=0.7221  qps=     8932
+  ef= 128  recall@10=0.7583  qps=     7083
+  ef= 192  recall@10=0.8039  qps=     5110
+  ef= 256  recall@10=0.8302  qps=     4015
+  ef= 384  recall@10=0.8615  qps=     2838
+  ef= 512  recall@10=0.8807  qps=     2193
+  all-core batch @ef=64: 122609 qps (recall 0.6620)
+wrote /Users/vividhyadav/Projects/strata/bench/results/glove-ablation.json

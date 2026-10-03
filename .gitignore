@@ -1,0 +1,9 @@
+build*/
+.venv/
+__pycache__/
+*.egg-info/
+*.so
+bench/data/
+*.hdf5
+.DS_Store
+.pytest_cache/
