@@ -99,6 +99,8 @@ if(STRATA_BUILD_BENCH)
   target_link_libraries(micro_distance PRIVATE strata)
   add_executable(bench_ingest bench/bench_ingest.cpp)
   target_link_libraries(bench_ingest PRIVATE strata)
+  add_executable(bench_filter bench/bench_filter.cpp)
+  target_link_libraries(bench_filter PRIVATE strata)
 endif()
 
 if(STRATA_BUILD_PYTHON)

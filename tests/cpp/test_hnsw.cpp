@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <set>
+#include <random>
 #include <thread>
+#include <unordered_map>
 
 #include "strata/flat.h"
 #include "strata/hnsw.h"
@@ -264,4 +266,55 @@ TEST_CASE("searches run while a batch is being inserted, and see consistent resu
     const auto queries = testutil::random_vectors(100, dim, 62);
     CHECK(testutil::recall_at_k(index, exact, queries, 100, 10, 128) >= 0.9);
   }
+}
+
+TEST_CASE("LabelMap matches std::unordered_map under random inserts, overwrites and erases") {
+  std::mt19937_64 rng(5);
+  LabelMap map;
+  std::unordered_map<label_t, node_t> ref;
+  for (int step = 0; step < 200000; ++step) {
+    const label_t key = rng() % 5000 + (step % 3 == 0 ? (label_t{1} << 40) : 0);  // collisions + spread
+    const int op = static_cast<int>(rng() % 10);
+    if (op < 6) {
+      const auto v = static_cast<node_t>(rng() % 1000000);
+      map.set(key, v);
+      ref[key] = v;
+    } else if (op < 9) {
+      CHECK(map.erase(key) == (ref.erase(key) == 1));
+    } else {
+      auto it = ref.find(key);
+      CHECK(map.find(key) == (it == ref.end() ? kInvalidNode : it->second));
+    }
+    if (step % 20000 == 0) {
+      REQUIRE(map.size() == ref.size());
+      size_t seen = 0;
+      map.for_each([&](label_t k, node_t v) {
+        ++seen;
+        CHECK(ref.at(k) == v);
+      });
+      CHECK(seen == ref.size());
+    }
+  }
+  for (const auto& [k, v] : ref) CHECK(map.find(k) == v);
+}
+
+TEST_CASE("filter planner: selective allow-lists are answered exactly, small indexes are scanned") {
+  Fixture f(20000, 16, 50);
+  HNSWIndex index(f.dim, Metric::L2);
+  index.add(f.data.data(), f.labels.data(), f.n, 4);
+  // 3% selectivity: above the fixed floor (lowered to 100 here), below the cost-based
+  // crossover sqrt(M0/2 * ef * n) ~ 4.5k -> answered by exact brute force.
+  index.set_flat_search_cutoff(100);
+  std::vector<label_t> allowed;
+  for (label_t i = 0; i < f.n; i += 33) allowed.push_back(i);
+  REQUIRE(allowed.size() > index.flat_search_cutoff());
+  const LabelFilter allow(allowed.data(), allowed.size(), LabelFilter::Mode::Allow);
+  FlatIndex exact(f.dim, Metric::L2);
+  exact.add(f.data.data(), f.labels.data(), f.n);
+  CHECK(testutil::recall_at_k(index, exact, f.queries, f.nq, 10, 64, &allow) == doctest::Approx(1.0));
+
+  // ef >= live vectors: every vector is reachable, whatever the graph looks like.
+  HNSWIndex tiny(f.dim, Metric::L2, {8, 32, 42, true});
+  tiny.add(f.data.data(), f.labels.data(), 100, 8);
+  CHECK(tiny.search(f.queries.data(), 100, 128).size() == 100);
 }

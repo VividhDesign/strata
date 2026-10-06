@@ -17,6 +17,7 @@
 #include "strata/common.h"
 #include "strata/distance.h"
 #include "strata/filter.h"
+#include "strata/label_map.h"
 #include "strata/sync.h"
 #include "strata/visited.h"
 
@@ -109,10 +110,14 @@ class HNSWIndex {
 
   size_t ef_search() const { return ef_search_.load(); }
   void set_ef_search(size_t ef) { ef_search_.store(ef ? ef : 1); }
-  // Allow-filters with at most this many labels are answered by exact brute force over the
-  // allowed set instead of a filtered graph walk (which degrades when few nodes qualify).
+  // Allow-filters are answered by exact brute force over the allowed set instead of a filtered
+  // graph walk when that is cheaper: the walk must visit ~ef/selectivity nodes to fill its
+  // results, so brute force wins when |allowed| <= sqrt(M * ef * n) (calibrated, see
+  // bench/bench_filter). At least this many labels always use brute force; 0 disables brute
+  // force entirely (always walk the graph).
   size_t flat_search_cutoff() const { return flat_cutoff_.load(); }
   void set_flat_search_cutoff(size_t n) { flat_cutoff_.store(n); }
+
 
  private:
   using Candidate = std::pair<float, node_t>;
@@ -179,12 +184,14 @@ class HNSWIndex {
   template <bool kFiltered, bool kLock>
   void search_layer_query(const Query& q, node_t ep, size_t ef, const LabelFilter* filter,
                           MaxHeap& top) const;
+
   std::vector<Candidate> select_neighbors(MaxHeap& candidates, size_t m) const;
   node_t connect(node_t cur, MaxHeap& candidates, int level);
 
   std::vector<SearchResult> search_unlocked(const float* query, size_t k, size_t ef,
                                             const LabelFilter* filter) const;
   std::vector<SearchResult> brute_force(const Query& q, size_t k, const LabelFilter& allow) const;
+  std::vector<SearchResult> scan_all(const Query& q, size_t k, const LabelFilter* filter) const;
   bool is_result(node_t n, const LabelFilter* filter) const {
     return !deleted_[n] && (filter == nullptr || filter->allows(labels_[n]));
   }
@@ -222,7 +229,7 @@ class HNSWIndex {
   std::vector<uint8_t> deleted_;
   size_t num_deleted_ = 0;
   std::unique_ptr<SpinLock[]> node_locks_;
-  std::unordered_map<label_t, node_t> label_to_node_;
+  LabelMap label_to_node_;
 
   // Graph entry point
   node_t entry_ = kInvalidNode;

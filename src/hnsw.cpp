@@ -241,11 +241,11 @@ void HNSWIndex::add(const float* vectors, const label_t* labels, size_t n, int n
     // Upsert: the previous version of a label becomes a tombstone. It stays in the graph as a
     // waypoint (removing it would disconnect neighbours) but is never returned.
     for (size_t i : order) {
-      auto it = label_to_node_.find(labels[i]);
-      if (it != label_to_node_.end()) {
-        deleted_[it->second] = 1;
+      const node_t old = label_to_node_.find(labels[i]);
+      if (old != kInvalidNode) {
+        deleted_[old] = 1;
         ++num_deleted_;
-        label_to_node_.erase(it);
+        label_to_node_.erase(labels[i]);
       }
     }
 
@@ -301,7 +301,7 @@ node_t HNSWIndex::place(label_t label) {
   levels_[cur] = level;
   links0(cur)[0] = 0;
   upper_[cur].reset(level > 0 ? new uint32_t[static_cast<size_t>(level) * (maxM_ + 1)]() : nullptr);
-  label_to_node_[label] = cur;
+  label_to_node_.set(label, cur);
   return cur;
 }
 
@@ -583,13 +583,27 @@ std::vector<SearchResult> HNSWIndex::search_unlocked(const float* query, size_t 
     q = normalized.data();
   }
 
-  if (filter && filter->mode() == LabelFilter::Mode::Allow && filter->size() <= flat_cutoff_.load()) {
-    Query bq;
-    prepare(q, has_full(), bq);
-    return brute_force(bq, k, *filter);
-  }
-
   ef = std::max(ef ? ef : ef_search_.load(), k);
+  // A walk with ef >= the number of live vectors visits all of them anyway; an exact scan is
+  // cheaper and cannot miss a node that parallel construction left without inbound links.
+  if (count_.load() - num_deleted_ <= ef && flat_cutoff_.load() > 0) {
+    Query sq;
+    prepare(q, has_full(), sq);
+    return scan_all(sq, k, filter);
+  }
+  if (filter && filter->mode() == LabelFilter::Mode::Allow) {
+    const size_t floor = flat_cutoff_.load();
+    const double live = static_cast<double>(count_.load() - num_deleted_);
+    // Brute force reads scattered nodes (~60-140 ns each); the walk visits ~ef/selectivity
+    // nodes. Calibrated with bench/bench_filter: the crossover is |allowed| ~ sqrt(M0/2 * ef * n),
+    // e.g. ~7% selectivity for 200k vectors at ef=64, ~3% for 1M.
+    const double crossover = std::sqrt(0.5 * static_cast<double>(maxM0_) * static_cast<double>(ef) * live);
+    if (floor > 0 && (filter->size() <= floor || static_cast<double>(filter->size()) <= crossover)) {
+      Query bq;
+      prepare(q, has_full(), bq);
+      return brute_force(bq, k, *filter);
+    }
+  }
   // linking_ only becomes true under the exclusive lock, so it cannot flip on while we hold
   // the shared lock having read false.
   const bool lock = linking_.load(std::memory_order_acquire);
@@ -648,22 +662,55 @@ std::vector<SearchResult> HNSWIndex::search_unlocked(const float* query, size_t 
   return out;
 }
 
-std::vector<SearchResult> HNSWIndex::brute_force(const Query& q, size_t k, const LabelFilter& allow) const {
-  std::priority_queue<std::pair<float, label_t>> top;
-  for (const label_t label : allow.labels()) {
-    auto it = label_to_node_.find(label);
-    if (it == label_to_node_.end()) continue;
-    const float d = qdist(q, it->second);
+std::vector<SearchResult> HNSWIndex::scan_all(const Query& q, size_t k, const LabelFilter* filter) const {
+  std::priority_queue<std::pair<float, node_t>> top;
+  const size_t n = count_.load();
+  for (node_t i = 0; i < n; ++i) {
+    if (!is_result(i, filter)) continue;
+    const float d = qdist(q, i);
     if (top.size() < k) {
-      top.emplace(d, label);
+      top.emplace(d, i);
     } else if (d < top.top().first) {
       top.pop();
-      top.emplace(d, label);
+      top.emplace(d, i);
     }
   }
   std::vector<SearchResult> out(top.size());
   for (size_t i = top.size(); i-- > 0;) {
-    out[i] = {top.top().second, top.top().first};
+    out[i] = {labels_[top.top().second], top.top().first};
+    top.pop();
+  }
+  return out;
+}
+
+std::vector<SearchResult> HNSWIndex::brute_force(const Query& q, size_t k, const LabelFilter& allow) const {
+  // Resolve labels first, then scan the nodes in memory order with prefetching: the random
+  // vector reads, not the distance math, dominate a scan over a scattered allow-list.
+  std::vector<node_t> nodes;
+  nodes.reserve(allow.size());
+  const std::vector<label_t>& labels = allow.labels();
+  constexpr size_t kLookAhead = 16;
+  for (size_t i = 0; i < labels.size(); ++i) {
+    if (i + kLookAhead < labels.size()) label_to_node_.prefetch(labels[i + kLookAhead]);
+    const node_t n = label_to_node_.find(labels[i]);
+    if (n != kInvalidNode) nodes.push_back(n);
+  }
+  std::sort(nodes.begin(), nodes.end());
+  std::priority_queue<std::pair<float, node_t>> top;
+  constexpr size_t kAhead = 8;
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    if (i + kAhead < nodes.size()) prefetch(q.exact ? static_cast<const void*>(full(nodes[i + kAhead])) : data(nodes[i + kAhead]));
+    const float d = qdist(q, nodes[i]);
+    if (top.size() < k) {
+      top.emplace(d, nodes[i]);
+    } else if (d < top.top().first) {
+      top.pop();
+      top.emplace(d, nodes[i]);
+    }
+  }
+  std::vector<SearchResult> out(top.size());
+  for (size_t i = top.size(); i-- > 0;) {
+    out[i] = {labels_[top.top().second], top.top().first};
     top.pop();
   }
   return out;
@@ -689,27 +736,27 @@ void HNSWIndex::search_batch(const float* queries, size_t nq, size_t k, size_t e
 bool HNSWIndex::remove(label_t label) {
   std::lock_guard<std::mutex> writer(write_mu_);
   std::unique_lock<std::shared_mutex> write_lock(rw_);
-  auto it = label_to_node_.find(label);
-  if (it == label_to_node_.end()) return false;
-  deleted_[it->second] = 1;
+  const node_t n = label_to_node_.find(label);
+  if (n == kInvalidNode) return false;
+  deleted_[n] = 1;
   ++num_deleted_;
-  label_to_node_.erase(it);
+  label_to_node_.erase(label);
   return true;
 }
 
 bool HNSWIndex::contains(label_t label) const {
   std::shared_lock<std::shared_mutex> read_lock(rw_);
-  return label_to_node_.count(label) != 0;
+  return label_to_node_.contains(label);
 }
 
 bool HNSWIndex::get_vector(label_t label, float* out) const {
   std::shared_lock<std::shared_mutex> read_lock(rw_);
-  auto it = label_to_node_.find(label);
-  if (it == label_to_node_.end()) return false;
+  const node_t n = label_to_node_.find(label);
+  if (n == kInvalidNode) return false;
   if (has_full()) {
-    std::memcpy(out, full(it->second), dim_ * sizeof(float));
+    std::memcpy(out, full(n), dim_ * sizeof(float));
   } else {
-    decode(it->second, out);
+    decode(n, out);
   }
   return true;
 }
@@ -718,7 +765,7 @@ std::vector<label_t> HNSWIndex::labels() const {
   std::shared_lock<std::shared_mutex> read_lock(rw_);
   std::vector<label_t> out;
   out.reserve(label_to_node_.size());
-  for (const auto& kv : label_to_node_) out.push_back(kv.first);
+  label_to_node_.for_each([&](label_t l, node_t) { out.push_back(l); });
   std::sort(out.begin(), out.end());
   return out;
 }
@@ -753,7 +800,7 @@ HNSWStats HNSWIndex::stats() const {
                                    sizeof(std::unique_ptr<uint32_t[]>);
   s.memory_bytes = capacity_ * (size_per_element_ + per_node_overhead) + upper_bytes +
                    raw_.size() * sizeof(float) + sq_min_.size() * 5 * sizeof(float) +
-                   label_to_node_.size() * (sizeof(label_t) + sizeof(node_t) + 2 * sizeof(void*));
+                   label_to_node_.memory_bytes();
   return s;
 }
 
@@ -949,7 +996,7 @@ std::unique_ptr<HNSWIndex> HNSWIndex::load(const std::string& path, bool mmap_ve
   index->max_level_ = max_level;
   index->label_to_node_.reserve(n - num_deleted);
   for (node_t i = 0; i < n; ++i) {
-    if (!index->deleted_[i]) index->label_to_node_[index->labels_[i]] = i;
+    if (!index->deleted_[i]) index->label_to_node_.set(index->labels_[i], i);
   }
   return index;
 }

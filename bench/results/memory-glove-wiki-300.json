@@ -1,0 +1,41 @@
+{
+  "dataset": "glove-wiki-300",
+  "n": 398000,
+  "dim": 300,
+  "ef": 128,
+  "float32_vectors_mib": 455.474853515625,
+  "rows": {
+    "float32": {
+      "rss_index_mib": 535.76953125,
+      "rss_after_queries_mib": 536.98828125,
+      "rss_file_after_queries_mib": 0.125,
+      "recall": 0.7945,
+      "qps": 904.5756330615493,
+      "file_mib": 516.784176826477
+    },
+    "sq8+rerank": {
+      "rss_index_mib": 651.16796875,
+      "rss_after_queries_mib": 652.38671875,
+      "rss_file_after_queries_mib": 0.125,
+      "recall": 0.7955,
+      "qps": 1207.584905518238,
+      "file_mib": 632.1734657287598
+    },
+    "sq8+rerank (mmap vectors)": {
+      "rss_index_mib": 195.69140625,
+      "rss_after_queries_mib": 196.91015625,
+      "rss_file_after_queries_mib": 455.71484375,
+      "recall": 0.7955,
+      "qps": 1378.2060690961125,
+      "file_mib": 632.1734657287598
+    },
+    "sq8 (no rerank)": {
+      "rss_index_mib": 195.69140625,
+      "rss_after_queries_mib": 196.91015625,
+      "rss_file_after_queries_mib": 0.125,
+      "recall": 0.7904000000000001,
+      "qps": 1039.4569079640721,
+      "file_mib": 176.69858169555664
+    }
+  }
+}
