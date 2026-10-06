@@ -1,6 +1,8 @@
 #include <doctest.h>
 
+#include <atomic>
 #include <filesystem>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 #include "strata/collection.h"
@@ -160,4 +162,38 @@ TEST_CASE("automatic checkpoint when the WAL grows past the threshold") {
   }
   CHECK(std::filesystem::exists(std::filesystem::path(dir) / "CURRENT"));
   CHECK(Collection::open(dir)->size() == 200);
+}
+
+TEST_CASE("queries are answered while an upsert batch is being indexed") {
+  testutil::TempDir tmp;
+  CollectionConfig cfg;
+  cfg.dim = 16;
+  cfg.metric = Metric::L2;
+  cfg.params.ef_construction = 64;
+  auto col = Collection::create(tmp.str("c"), cfg);
+  const size_t base = 2000, extra = 20000;
+  const auto vecs = testutil::random_vectors(base + extra, cfg.dim, 71);
+  const auto ids = testutil::iota_labels(base + extra);
+  std::vector<std::string> md(base, R"({"part": "base"})");
+  col->upsert(ids.data(), vecs.data(), base, md);
+
+  std::atomic<bool> writing{true};
+  std::atomic<size_t> answered{0}, bad{0};
+  std::thread reader([&] {
+    size_t i = 0;
+    while (writing.load()) {
+      const size_t probe = (i++ * 104729) % base;
+      const auto hits = col->query(vecs.data() + probe * cfg.dim, 1, 3, 64, R"({"part": "base"})");
+      if (hits[0].empty() || hits[0][0].id != probe) bad.fetch_add(1);
+      (void)col->stats_json();
+      answered.fetch_add(1);
+    }
+  });
+  std::vector<std::string> md2(extra, R"({"part": "new"})");
+  col->upsert(ids.data() + base, vecs.data() + base * cfg.dim, extra, md2);
+  writing.store(false);
+  reader.join();
+  CHECK(answered.load() > 0);
+  CHECK(bad.load() == 0);
+  CHECK(col->size() == base + extra);
 }

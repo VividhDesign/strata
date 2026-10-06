@@ -171,3 +171,37 @@ def test_sq8_collection(tmp_path):
     del col
     col = strata.Collection.open(path)
     assert col.query(x[:1], k=1)[0][0].id == 0
+
+
+def test_sq8_mmap_vectors(tmp_path):
+    rng = np.random.default_rng(7)
+    x = rng.standard_normal((2000, 32)).astype(np.float32)
+    index = strata.Index(32, "cosine", quantization="sq8")
+    index.add(x)
+    index.save(str(tmp_path / "i.bin"))
+    mapped = strata.Index.load(str(tmp_path / "i.bin"), mmap_vectors=True)
+    np.testing.assert_array_equal(mapped.search(x[:20], k=5)[0], index.search(x[:20], k=5)[0])
+    assert mapped.stats()["memory_bytes"] < index.stats()["memory_bytes"]
+    mapped.add(x[:10], ids=np.arange(10_000, 10_010))  # first write copies the vectors into RAM
+    assert len(mapped) == 2010
+
+
+def test_search_during_add_from_python():
+    rng = np.random.default_rng(8)
+    x = rng.standard_normal((30000, 32)).astype(np.float32)
+    index = strata.Index(32, "l2")
+    index.add(x[:2000])
+    done, answered = threading.Event(), []
+
+    def reader():
+        while not done.is_set():
+            ids, _ = index.search(x[:4], k=1, num_threads=1)
+            assert (ids[:, 0] == np.arange(4)).all()
+            answered.append(1)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    index.add(x[2000:], ids=np.arange(2000, 30000), num_threads=2)  # releases the GIL
+    done.set()
+    t.join()
+    assert len(answered) > 0 and len(index) == 30000

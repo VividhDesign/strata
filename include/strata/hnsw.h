@@ -56,10 +56,17 @@ struct HNSWStats {
 };
 
 // Thread safety:
-//   * add()/remove()/compact() take the index-wide lock exclusively. add() then inserts in
-//     parallel internally, coordinating through 1-byte per-node spinlocks.
-//   * search()/search_batch() take the lock shared, so any number of queries run in parallel
-//     and read the graph without per-node locking.
+//   * Writers (add/remove/compact) are serialised by a writer mutex.
+//   * add() holds the index-wide lock exclusively only for a short first phase (allocate nodes,
+//     store vectors, update the label map). It then links the new nodes into the graph in
+//     parallel under the *shared* lock, coordinating through 1-byte per-node spinlocks, so
+//     searches keep running while a batch is being inserted. A new vector is visible to
+//     filtered brute-force search and get_vector() after the first phase, and to graph search
+//     once it is linked.
+//   * search()/search_batch() take the lock shared. When no insert is linking, they read the
+//     graph without per-node locking; during an insert they copy neighbour lists under the
+//     node spinlocks.
+//   * remove() and compact() take the lock exclusively (remove is O(1); compact rebuilds).
 class HNSWIndex {
  public:
   HNSWIndex(size_t dim, Metric metric, HNSWParams params = {}, size_t initial_capacity = 1024);
@@ -162,12 +169,14 @@ class HNSWIndex {
 
   void grow_to(size_t new_capacity);
   int random_level(label_t label) const;
-  void insert_one(const float* vector, label_t label);
+  node_t place(label_t label);                        // first phase of add(), serial
+  void store_vector(node_t cur, const float* vector);  // first phase of add(), parallel
+  void link(node_t cur, const float* vector);          // second phase of add(), parallel
 
   template <bool kLock>
   void greedy_search(const Query& q, node_t& ep, float& ep_dist, int level) const;
   MaxHeap search_layer_build(const Query& q, node_t ep, int level) const;
-  template <bool kFiltered>
+  template <bool kFiltered, bool kLock>
   void search_layer_query(const Query& q, node_t ep, size_t ef, const LabelFilter* filter,
                           MaxHeap& top) const;
   std::vector<Candidate> select_neighbors(MaxHeap& candidates, size_t m) const;
@@ -219,9 +228,10 @@ class HNSWIndex {
   node_t entry_ = kInvalidNode;
   int max_level_ = -1;
 
-  mutable std::shared_mutex rw_;  // readers: queries; writer: add/remove/compact
-  std::mutex label_mu_;           // label map, during parallel inserts
-  std::mutex entry_mu_;           // entry point, during parallel inserts
+  mutable std::shared_mutex rw_;  // readers: queries and add()'s linking phase; writer: see above
+  mutable std::mutex write_mu_;   // serialises writers (and save) with each other
+  mutable std::mutex entry_mu_;   // entry point, during parallel inserts
+  std::atomic<bool> linking_{false};  // add() is linking nodes: readers must lock neighbour lists
   mutable VisitedPool visited_;
 };
 

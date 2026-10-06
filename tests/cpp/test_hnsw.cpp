@@ -1,6 +1,7 @@
 #include <doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <set>
 #include <thread>
 
@@ -219,4 +220,48 @@ TEST_CASE("plain neighbour selection works too (ablation switch)") {
   FlatIndex exact(f.dim, Metric::L2);
   exact.add(f.data.data(), f.labels.data(), f.n);
   CHECK(testutil::recall_at_k(index, exact, f.queries, f.nq, 10, 128) >= 0.9);
+}
+
+TEST_CASE("searches run while a batch is being inserted, and see consistent results") {
+  const size_t dim = 24, base = 3000, extra = 20000;
+  const auto data = testutil::random_vectors(base + extra, dim, 61);
+  const auto labels = testutil::iota_labels(base + extra);
+  for (Quantization qz : {Quantization::None, Quantization::SQ8}) {
+    CAPTURE(static_cast<int>(qz));
+    HNSWParams p;
+    p.quantization = qz;
+    HNSWIndex index(dim, Metric::L2, p);
+    index.add(data.data(), labels.data(), base, 4);
+
+    std::atomic<bool> adding{true};
+    std::atomic<size_t> during{0}, bad{0};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t) {
+      readers.emplace_back([&, t] {
+        size_t i = static_cast<size_t>(t);
+        while (adding.load()) {
+          // The base vectors are always present: each must find itself.
+          const size_t probe = (i * 7919) % base;
+          const auto res = index.search(data.data() + probe * dim, 5, 64);
+          if (res.empty() || res[0].label != probe) bad.fetch_add(1);
+          for (const auto& r : res) {
+            if (r.label >= base + extra) bad.fetch_add(1);
+          }
+          (void)index.stats();
+          during.fetch_add(1);
+          ++i;
+        }
+      });
+    }
+    index.add(data.data() + base * dim, labels.data() + base, extra, 2);
+    adding.store(false);
+    for (auto& r : readers) r.join();
+    CHECK(during.load() > 0);  // readers made progress while the batch was linking
+    CHECK(bad.load() == 0);
+    CHECK(index.size() == base + extra);
+    FlatIndex exact(dim, Metric::L2);
+    exact.add(data.data(), labels.data(), base + extra);
+    const auto queries = testutil::random_vectors(100, dim, 62);
+    CHECK(testutil::recall_at_k(index, exact, queries, 100, 10, 128) >= 0.9);
+  }
 }

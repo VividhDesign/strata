@@ -146,13 +146,14 @@ void Collection::recover() {
   } else {
     index_ = std::make_unique<HNSWIndex>(cfg_.dim, cfg_.metric, cfg_.params);
   }
-  seq_ = snapshot_seq_;
+  seq_.store(snapshot_seq_.load());
   wal_ = std::make_unique<WriteAheadLog>((root / "wal.log").string(), cfg_.sync_wal);
   wal_->replay([&](const WriteAheadLog::Record& rec) {
-    if (rec.seq <= snapshot_seq_) return;  // already contained in the snapshot
+    if (rec.seq <= snapshot_seq_.load()) return;  // already contained in the snapshot
     apply(rec);
-    seq_ = rec.seq;
+    seq_.store(rec.seq);
   });
+  wal_bytes_.store(wal_->size_bytes());
 }
 
 void Collection::apply(const WriteAheadLog::Record& rec) {
@@ -195,23 +196,34 @@ void Collection::upsert(const label_t* ids, const float* vectors, size_t n, cons
   for (size_t i = 0; i < n; ++i) {
     if (ids[i] == kNoLabel) throw Error("id 2^64-1 is reserved");
   }
-  std::unique_lock<std::shared_mutex> lock(mu_);
-  WriteAheadLog::Record rec{seq_ + 1, WriteAheadLog::Op::Upsert, encode_upsert(ids, vectors, n, cfg_.dim, metadata)};
-  wal_->append(rec.seq, rec.op, rec.payload);
-  apply(rec);
-  seq_ = rec.seq;
+  std::lock_guard<std::mutex> writer(write_mu_);
+  const uint64_t seq = seq_.load() + 1;
+  wal_->append(seq, WriteAheadLog::Op::Upsert, encode_upsert(ids, vectors, n, cfg_.dim, metadata));
+  wal_bytes_.store(wal_->size_bytes());
+  {
+    // Metadata first: a query can meet an id whose metadata is set but whose vector is still
+    // being indexed (harmless), never an indexed vector without its metadata.
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    for (size_t i = 0; i < n; ++i) meta_.put(ids[i], metadata.empty() ? std::string() : metadata[i]);
+  }
+  index_->add(vectors, ids, n);  // queries keep running during the linking phase
+  seq_.store(seq);
   if (wal_->size_bytes() > cfg_.checkpoint_wal_bytes) checkpoint_locked();
 }
 
 size_t Collection::remove(const label_t* ids, size_t n) {
   if (n == 0) return 0;
-  std::unique_lock<std::shared_mutex> lock(mu_);
+  std::lock_guard<std::mutex> writer(write_mu_);
   size_t existing = 0;
   for (size_t i = 0; i < n; ++i) existing += index_->contains(ids[i]) ? 1 : 0;
-  WriteAheadLog::Record rec{seq_ + 1, WriteAheadLog::Op::Delete, encode_delete(ids, n)};
+  WriteAheadLog::Record rec{seq_.load() + 1, WriteAheadLog::Op::Delete, encode_delete(ids, n)};
   wal_->append(rec.seq, rec.op, rec.payload);
-  apply(rec);
-  seq_ = rec.seq;
+  wal_bytes_.store(wal_->size_bytes());
+  {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    apply(rec);
+  }
+  seq_.store(rec.seq);
   if (wal_->size_bytes() > cfg_.checkpoint_wal_bytes) checkpoint_locked();
   return existing;
 }
@@ -253,7 +265,7 @@ bool Collection::get(label_t id, std::vector<float>* vector, std::string* metada
 }
 
 void Collection::checkpoint() {
-  std::unique_lock<std::shared_mutex> lock(mu_);
+  std::lock_guard<std::mutex> writer(write_mu_);
   checkpoint_locked();
 }
 
@@ -265,7 +277,7 @@ void Collection::checkpoint() {
 // records are <= the snapshot seq and are skipped on replay.
 void Collection::checkpoint_locked() {
   const fs::path root(dir_);
-  const std::string name = snapshot_name(seq_);
+  const std::string name = snapshot_name(seq_.load());
   const fs::path tmp = root / (name + ".tmp");
   const fs::path snap = root / name;
   fs::remove_all(tmp);
@@ -283,7 +295,8 @@ void Collection::checkpoint_locked() {
   fsync_dir(root.string());
   atomic_write_file((root / "CURRENT").string(), name + "\n");
   wal_->truncate();
-  snapshot_seq_ = seq_;
+  wal_bytes_.store(wal_->size_bytes());
+  snapshot_seq_.store(seq_.load());
   for (const auto& entry : fs::directory_iterator(root)) {
     const std::string fname = entry.path().filename().string();
     if (entry.is_directory() && fname.rfind("snap-", 0) == 0 && fname != name) fs::remove_all(entry.path());
@@ -307,9 +320,9 @@ std::string Collection::stats_json() const {
   j["mean_degree_level0"] = s.mean_degree_level0;
   j["memory_bytes"] = s.memory_bytes;
   j["ef_search"] = index_->ef_search();
-  j["last_seq"] = seq_;
-  j["snapshot_seq"] = snapshot_seq_;
-  j["wal_bytes"] = wal_->size_bytes();
+  j["last_seq"] = seq_.load();
+  j["snapshot_seq"] = snapshot_seq_.load();
+  j["wal_bytes"] = wal_bytes_.load();
   return j.dump();
 }
 

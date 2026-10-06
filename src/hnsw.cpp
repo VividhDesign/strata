@@ -216,44 +216,63 @@ void HNSWIndex::add(const float* vectors, const label_t* labels, size_t n, int n
   for (size_t i = 0; i < n; ++i) {
     if (labels[i] == kNoLabel) throw Error("label 2^64-1 is reserved");
   }
-  std::unique_lock<std::shared_mutex> write_lock(rw_);
-  materialize_raw();
-
-  // Last occurrence of a label in the batch wins.
+  std::lock_guard<std::mutex> writer(write_mu_);
   std::vector<size_t> order;
-  order.reserve(n);
-  if (n == 1) {
-    order.push_back(0);
-  } else {
-    std::unordered_map<label_t, size_t> last;
-    last.reserve(n * 2);
-    for (size_t i = 0; i < n; ++i) last[labels[i]] = i;
-    for (size_t i = 0; i < n; ++i) {
-      if (last[labels[i]] == i) order.push_back(i);
+  std::vector<node_t> nodes;
+
+  // Phase 1, exclusive: allocate nodes, store vectors, update labels. Short: O(n * dim).
+  {
+    std::unique_lock<std::shared_mutex> write_lock(rw_);
+    materialize_raw();
+
+    // Last occurrence of a label in the batch wins.
+    order.reserve(n);
+    if (n == 1) {
+      order.push_back(0);
+    } else {
+      std::unordered_map<label_t, size_t> last;
+      last.reserve(n * 2);
+      for (size_t i = 0; i < n; ++i) last[labels[i]] = i;
+      for (size_t i = 0; i < n; ++i) {
+        if (last[labels[i]] == i) order.push_back(i);
+      }
     }
+
+    // Upsert: the previous version of a label becomes a tombstone. It stays in the graph as a
+    // waypoint (removing it would disconnect neighbours) but is never returned.
+    for (size_t i : order) {
+      auto it = label_to_node_.find(labels[i]);
+      if (it != label_to_node_.end()) {
+        deleted_[it->second] = 1;
+        ++num_deleted_;
+        label_to_node_.erase(it);
+      }
+    }
+
+    if (sq_ && (!sq_trained_ || count_.load() < kSqFreezeAt)) train_sq(vectors, order);
+
+    const size_t needed = count_.load() + order.size();
+    if (needed > static_cast<size_t>(std::numeric_limits<node_t>::max()) - 1) throw Error("index is full");
+    if (needed > capacity_) grow_to(std::max(needed, capacity_ * 2));
+    label_to_node_.reserve(label_to_node_.size() + order.size());
+
+    nodes.resize(order.size());
+    for (size_t j = 0; j < order.size(); ++j) nodes[j] = place(labels[order[j]]);
+    parallel_for(order.size(), num_threads, [&](size_t j) { store_vector(nodes[j], vectors + order[j] * dim_); });
+    linking_.store(true, std::memory_order_release);
   }
 
-  // Upsert: the previous version of a label becomes a tombstone. It stays in the graph as a
-  // waypoint (removing it would disconnect neighbours) but is never returned.
-  for (size_t i : order) {
-    auto it = label_to_node_.find(labels[i]);
-    if (it != label_to_node_.end()) {
-      deleted_[it->second] = 1;
-      ++num_deleted_;
-      label_to_node_.erase(it);
-    }
+  // Phase 2, shared: link the new nodes while queries keep running (see the header).
+  {
+    std::shared_lock<std::shared_mutex> read_lock(rw_);
+    parallel_for(order.size(), num_threads, [&](size_t j) { link(nodes[j], vectors + order[j] * dim_); });
+    linking_.store(false, std::memory_order_release);
   }
 
-  if (sq_ && (!sq_trained_ || count_.load() < kSqFreezeAt)) train_sq(vectors, order);
-
-  const size_t needed = count_.load() + order.size();
-  if (needed > static_cast<size_t>(std::numeric_limits<node_t>::max()) - 1) throw Error("index is full");
-  if (needed > capacity_) grow_to(std::max(needed, capacity_ * 2));
-  label_to_node_.reserve(label_to_node_.size() + order.size());
-
-  parallel_for(order.size(), num_threads,
-               [&](size_t j) { insert_one(vectors + order[j] * dim_, labels[order[j]]); });
-  if (sq_keep_raw_ && !params_.rerank && count_.load() >= kSqFreezeAt) release_raw();
+  if (sq_keep_raw_ && !params_.rerank && count_.load() >= kSqFreezeAt) {
+    std::unique_lock<std::shared_mutex> write_lock(rw_);
+    release_raw();
+  }
 }
 
 // Quantizer ranges are now fixed: without rerank the float32 vectors are no longer needed.
@@ -274,12 +293,21 @@ void HNSWIndex::materialize_raw() {
   raw_ptr_ = raw_.data();
 }
 
-void HNSWIndex::insert_one(const float* vector, label_t label) {
+node_t HNSWIndex::place(label_t label) {
   const auto cur = static_cast<node_t>(count_.fetch_add(1, std::memory_order_relaxed));
   labels_[cur] = label;
   deleted_[cur] = 0;
-  // The full-precision (normalised for cosine) vector: stored in the graph block, in raw_, or
-  // only in a scratch buffer when just the codes are kept.
+  const int level = random_level(label);
+  levels_[cur] = level;
+  links0(cur)[0] = 0;
+  upper_[cur].reset(level > 0 ? new uint32_t[static_cast<size_t>(level) * (maxM_ + 1)]() : nullptr);
+  label_to_node_[label] = cur;
+  return cur;
+}
+
+// The full-precision (normalised for cosine) vector goes into the graph block or into raw_;
+// with SQ8 the codes go into the graph block.
+void HNSWIndex::store_vector(node_t cur, const float* vector) {
   std::vector<float> scratch;
   float* dst;
   if (!sq_) {
@@ -293,15 +321,19 @@ void HNSWIndex::insert_one(const float* vector, label_t label) {
   std::memcpy(dst, vector, dim_ * sizeof(float));
   if (metric_ == Metric::Cosine) normalize_inplace(dst, dim_);
   if (sq_) encode(dst, reinterpret_cast<uint8_t*>(const_cast<char*>(data(cur))));
+}
 
-  const int level = random_level(label);
-  levels_[cur] = level;
-  links0(cur)[0] = 0;
-  if (level > 0) upper_[cur].reset(new uint32_t[static_cast<size_t>(level) * (maxM_ + 1)]());
-  {
-    std::lock_guard<std::mutex> g(label_mu_);
-    label_to_node_[label] = cur;
+void HNSWIndex::link(node_t cur, const float* vector) {
+  // Build distances use float32 vectors whenever they are kept, so a quantized index with
+  // rerank has the same graph as a float32 one.
+  std::vector<float> scratch;
+  const float* qv = full(cur);
+  if (qv == nullptr) {  // codes only: build from the caller's vector
+    scratch.assign(vector, vector + dim_);
+    if (metric_ == Metric::Cosine) normalize_inplace(scratch.data(), dim_);
+    qv = scratch.data();
   }
+  const int level = levels_[cur];
 
   // Hold our own node lock for the whole insertion: other threads that discover `cur` through
   // a reverse link will wait until its own neighbour list is complete.
@@ -320,10 +352,8 @@ void HNSWIndex::insert_one(const float* vector, label_t label) {
     return;
   }
 
-  // Build distances use float32 vectors whenever they are kept, so a quantized index with
-  // rerank has the same graph as a float32 one.
   Query q;
-  prepare(dst, has_full(), q);
+  prepare(qv, has_full(), q);
   float ep_dist = qdist(q, ep);
   // Phase 1: greedy descent through the levels above the new node's level.
   for (int l = top_level; l > level; --l) greedy_search<true>(q, ep, ep_dist, l);
@@ -480,10 +510,12 @@ node_t HNSWIndex::connect(node_t cur, MaxHeap& candidates, int level) {
 // Search (paper Alg. 5)
 // ---------------------------------------------------------------------------------------------
 
-// Query-time beam search on level 0. Runs under the shared lock, so the graph is immutable
-// and no per-node locking is needed. Tombstones and filtered-out nodes are traversed but
-// never enter `top`; in that case we keep exploring until `top` holds ef valid results.
-template <bool kFiltered>
+// Query-time beam search on level 0. Runs under the shared lock. Without a concurrent insert
+// (kLock = false) the graph is immutable and no per-node locking is needed; during an insert
+// each neighbour list is copied under its node's spinlock. Tombstones and filtered-out nodes
+// are traversed but never enter `top`; in that case we keep exploring until `top` holds ef
+// valid results.
+template <bool kFiltered, bool kLock>
 void HNSWIndex::search_layer_query(const Query& q, node_t ep, size_t ef, const LabelFilter* filter,
                                    MaxHeap& top) const {
   VisitedHandle handle(visited_);
@@ -500,12 +532,19 @@ void HNSWIndex::search_layer_query(const Query& q, node_t ep, size_t ef, const L
   frontier.emplace(d0, ep);
   visited.visit(ep);
 
+  std::vector<uint32_t> copy;
+  if constexpr (kLock) copy.reserve(maxM0_ + 1);
   while (!frontier.empty()) {
     const auto [cd, c] = frontier.top();
     if (cd > worst && (top.size() >= ef || !must_fill)) break;
     frontier.pop();
 
     const uint32_t* l = links0(c);
+    if constexpr (kLock) {
+      std::lock_guard<SpinLock> g(node_locks_[c]);
+      copy.assign(l, l + 1 + l[0]);
+      l = copy.data();
+    }
     const uint32_t count = l[0];
     if (count > 0) prefetch(data(l[1]));
     for (uint32_t j = 1; j <= count; ++j) {
@@ -534,7 +573,7 @@ std::vector<SearchResult> HNSWIndex::search(const float* query, size_t k, size_t
 std::vector<SearchResult> HNSWIndex::search_unlocked(const float* query, size_t k, size_t ef,
                                                      const LabelFilter* filter) const {
   std::vector<SearchResult> out;
-  if (k == 0 || entry_ == kInvalidNode || count_.load() == num_deleted_) return out;
+  if (k == 0 || count_.load() == num_deleted_) return out;
 
   std::vector<float> normalized;
   const float* q = query;
@@ -551,17 +590,43 @@ std::vector<SearchResult> HNSWIndex::search_unlocked(const float* query, size_t 
   }
 
   ef = std::max(ef ? ef : ef_search_.load(), k);
+  // linking_ only becomes true under the exclusive lock, so it cannot flip on while we hold
+  // the shared lock having read false.
+  const bool lock = linking_.load(std::memory_order_acquire);
+  node_t ep;
+  int top_level;
+  if (lock) {
+    std::lock_guard<std::mutex> g(entry_mu_);
+    ep = entry_;
+    top_level = max_level_;
+  } else {
+    ep = entry_;
+    top_level = max_level_;
+  }
+  if (ep == kInvalidNode) return out;
+
   Query pq;
   prepare(q, false, pq);  // SQ8 codes when quantized
-  node_t ep = entry_;
   float ep_dist = qdist(pq, ep);
-  for (int l = max_level_; l > 0; --l) greedy_search<false>(pq, ep, ep_dist, l);
+  for (int l = top_level; l > 0; --l) {
+    if (lock) {
+      greedy_search<true>(pq, ep, ep_dist, l);
+    } else {
+      greedy_search<false>(pq, ep, ep_dist, l);
+    }
+  }
 
   MaxHeap top;
   if (filter) {
-    search_layer_query<true>(pq, ep, ef, filter, top);
+    if (lock) {
+      search_layer_query<true, true>(pq, ep, ef, filter, top);
+    } else {
+      search_layer_query<true, false>(pq, ep, ef, filter, top);
+    }
+  } else if (lock) {
+    search_layer_query<false, true>(pq, ep, ef, nullptr, top);
   } else {
-    search_layer_query<false>(pq, ep, ef, nullptr, top);
+    search_layer_query<false, false>(pq, ep, ef, nullptr, top);
   }
   if (sq_ && params_.rerank) {
     // Re-rank the ef candidates with exact distances on the float32 vectors.
@@ -622,6 +687,7 @@ void HNSWIndex::search_batch(const float* queries, size_t nq, size_t k, size_t e
 // ---------------------------------------------------------------------------------------------
 
 bool HNSWIndex::remove(label_t label) {
+  std::lock_guard<std::mutex> writer(write_mu_);
   std::unique_lock<std::shared_mutex> write_lock(rw_);
   auto it = label_to_node_.find(label);
   if (it == label_to_node_.end()) return false;
@@ -670,10 +736,16 @@ HNSWStats HNSWIndex::stats() const {
   s.deleted = num_deleted_;
   s.size = n - num_deleted_;
   s.capacity = capacity_;
-  s.max_level = max_level_;
+  {
+    std::lock_guard<std::mutex> g(entry_mu_);
+    s.max_level = max_level_;
+  }
   size_t degree_sum = 0, upper_bytes = 0;
   for (node_t i = 0; i < n; ++i) {
-    if (!deleted_[i]) degree_sum += links0(i)[0];
+    if (!deleted_[i]) {
+      std::lock_guard<SpinLock> g(node_locks_[i]);  // an insert may be linking concurrently
+      degree_sum += links0(i)[0];
+    }
     if (levels_[i] > 0) upper_bytes += static_cast<size_t>(levels_[i]) * (maxM_ + 1) * sizeof(uint32_t);
   }
   s.mean_degree_level0 = s.size ? static_cast<double>(degree_sum) / static_cast<double>(s.size) : 0.0;
@@ -686,6 +758,7 @@ HNSWStats HNSWIndex::stats() const {
 }
 
 void HNSWIndex::compact(int num_threads) {
+  std::lock_guard<std::mutex> writer(write_mu_);
   std::unique_lock<std::shared_mutex> write_lock(rw_);
   if (num_deleted_ == 0) return;
   const size_t n = count_.load();
@@ -739,6 +812,7 @@ void HNSWIndex::swap_storage(HNSWIndex& other) {
 // ---------------------------------------------------------------------------------------------
 
 void HNSWIndex::save(const std::string& path) const {
+  std::lock_guard<std::mutex> writer(write_mu_);  // a consistent graph: no insert in flight
   std::shared_lock<std::shared_mutex> read_lock(rw_);
   const std::string tmp = path + ".tmp";
   {
