@@ -77,6 +77,7 @@ if(STRATA_BUILD_TESTS)
     tests/cpp/test_distance.cpp
     tests/cpp/test_hnsw.cpp
     tests/cpp/test_persistence.cpp
+    tests/cpp/test_quantization.cpp
     tests/cpp/test_collection.cpp)
   target_include_directories(strata_tests PRIVATE ${doctest_SOURCE_DIR} tests/cpp)
   target_link_libraries(strata_tests PRIVATE strata)

@@ -2,7 +2,8 @@
 //
 //   strata-server --data-dir ./strata-data --port 8080
 //
-//   POST   /collections                       {"name", "dim", "metric"?, "M"?, "ef_construction"?}
+//   POST   /collections                       {"name", "dim", "metric"?, "M"?, "ef_construction"?,
+//                                               "quantization"? ("none" | "sq8"), "rerank"?}
 //   GET    /collections                       list collections with stats
 //   GET    /collections/{name}                stats
 //   DELETE /collections/{name}                drop collection (removes its directory)
@@ -276,6 +277,8 @@ int main(int argc, char** argv) {
                 cfg.metric = strata::parse_metric(body.value("metric", "cosine"));
                 cfg.params.M = body.value("M", static_cast<size_t>(16));
                 cfg.params.ef_construction = body.value("ef_construction", static_cast<size_t>(200));
+                cfg.params.quantization = strata::parse_quantization(body.value("quantization", "none"));
+                cfg.params.rerank = body.value("rerank", true);
                 auto c = registry.create(cfg);
                 send_json(res, json::parse(c->stats_json()), 201);
               }));

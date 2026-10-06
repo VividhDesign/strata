@@ -74,6 +74,38 @@ upper levels, separate per-node array (rare: ~1/M of nodes):
 - While scanning a neighbour list we `__builtin_prefetch` the *next* neighbour's vector.
   This hides DRAM latency behind the current distance computation.
 
+### Scalar quantization (`quantization="sq8"`)
+
+With SQ8 the vector in the level-0 block is replaced by **one byte per dimension**:
+
+```
+  [neighbour count: u32][neighbour ids: u32 × 2M][pad to 16 B][codes: u8 × d][pad to 16 B]
+```
+
+For d = 128 and M = 16 a block shrinks from 656 to 272 bytes. Search is memory-bound, so the
+traversal touches 2.4× fewer cache lines.
+
+- **Codebook.** Each dimension gets its own range: `x ≈ min_d + scale_d · c`, with
+  `scale_d = (max_d − min_d) / 255`. The range is trained on the first batch. While the index holds
+  fewer than 1,000 vectors, every later batch widens the range and re-encodes the existing codes.
+  Without this, one-by-one upserts would freeze a degenerate range taken from the first vector
+  (I caught this with a test: recall dropped to 0.50). After that the ranges are frozen and outliers are clamped.
+- **Asymmetric distances.** The query stays float. It is transformed once per search, so every
+  candidate needs only a widen-and-FMA:
+  - L2: `Σ scale_d² · ((q_d − min_d)/scale_d − c_d)²`
+  - IP and cosine: `1 − ⟨q, min⟩ − Σ (q_d · scale_d) · c_d`
+
+  The kernels (`kernels::sq8_l2`, `kernels::sq8_dot`) widen u8 → f32 in registers: AVX2 uses
+  `cvtepu8_epi32`, NEON uses `vmovl_u8 → vmovl_u16 → vcvtq_f32_u32`. They keep the same multi-accumulator
+  structure as the float kernels. The NEON path was checked against the scalar kernel on x86 through
+  the NEON_2_SSE emulation header.
+- **`rerank=True` (default).** The float vectors are also kept, in a separate cold array outside the
+  graph blocks. The graph is **built** with exact float distances, so it is identical to the float index.
+  Queries walk the graph on codes and then re-rank the `ef` candidates with exact distances. Recall
+  matches the float index and the returned distances are exact.
+- **`rerank=False`.** The float vectors are dropped once the ranges freeze. The index is about 3× smaller,
+  the graph is built on codes and distances are approximate.
+
 ## 5. Distance kernels (`src/distance.cpp`)
 
 Without `-ffast-math` the compiler won't reorder a float sum, so a plain `sum += a[i]*b[i]`
@@ -167,8 +199,10 @@ collection/
 
 ## 10. What I would do next
 
-- **Product quantization / int8 scalar quantization**: cut memory 4-32× and rerank with
-  full-precision vectors.
+- **Product quantization / RaBitQ**: int8 scalar quantization is done (section 4). PQ or 1-bit
+  RaBitQ codes would cut memory a further 4–8×.
+- **Out-of-core rerank vectors**: with SQ8 the float vectors are only read for the final rerank.
+  They could live in an mmap'd file while codes and graph stay in RAM.
 - **Segments**: an immutable HNSW plus a small mutable buffer, so writes never block
   reads.
 - **mmap-able snapshots** for instant startup on large indexes.

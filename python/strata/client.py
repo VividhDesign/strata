@@ -44,9 +44,11 @@ class Client:
         return self._call("GET", "/health")
 
     def create_collection(self, name: str, dim: int, metric: str = "cosine", M: int = 16,
-                          ef_construction: int = 200) -> dict:
+                          ef_construction: int = 200, quantization: str = "none",
+                          rerank: bool = True) -> dict:
         return self._call("POST", "/collections", {"name": name, "dim": dim, "metric": metric, "M": M,
-                                                   "ef_construction": ef_construction})
+                                                   "ef_construction": ef_construction,
+                                                   "quantization": quantization, "rerank": rerank})
 
     def list_collections(self) -> list[dict]:
         return self._call("GET", "/collections")["collections"]

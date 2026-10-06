@@ -6,6 +6,10 @@ cores; queries run single-threaded (the ann-benchmarks convention) while sweepin
     python bench/bench_ann.py --dataset sift            # 1M x 128, L2
     python bench/bench_ann.py --dataset glove           # 1.18M x 100, angular
     python bench/bench_ann.py --dataset sift --limit 100000 --libs strata
+    python bench/bench_ann.py --dataset glove-wiki-300 --libs strata,strata-sq8,faiss-sq8
+
+The glove-wiki-* datasets are GloVe 6B (Wikipedia + Gigaword, 400k words) from the gensim-data
+GitHub releases; 10,000 random words are held out as queries. Put the .gz files in bench/data/.
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ RESULTS = Path(__file__).parent / "results"
 DATASETS = {
     "sift": ("sift-128-euclidean.hdf5", "l2"),
     "glove": ("glove-100-angular.hdf5", "cosine"),
+    "glove-wiki-100": ("glove-wiki-gigaword-100.gz", "cosine"),
+    "glove-wiki-300": ("glove-wiki-gigaword-300.gz", "cosine"),
 }
 EF_SWEEP = [10, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512]
 
@@ -40,8 +46,36 @@ def cpu_name() -> str:
         return platform.processor()
 
 
+def load_word2vec_gz(path: Path, n_queries: int):
+    """word2vec text format (gensim-data): header "n dim", then "word v1 ... vdim" per line."""
+    cache = path.with_suffix(".npy")
+    if cache.exists():
+        x = np.load(cache)
+    else:
+        import gzip
+
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            n, dim = map(int, f.readline().split())
+            x = np.empty((n, dim), dtype=np.float32)
+            for i, line in enumerate(f):
+                x[i] = np.asarray(line.rstrip().rsplit(" ", dim)[1:], dtype=np.float32)
+        np.save(cache, x)
+    perm = np.random.default_rng(0).permutation(len(x))
+    return x[perm[n_queries:]], x[perm[:n_queries]]
+
+
 def load(name: str, limit: int | None, n_queries: int):
     fname, metric = DATASETS[name]
+    if fname.endswith(".gz"):
+        import faiss
+
+        train, test = load_word2vec_gz(DATA / fname, n_queries)
+        train = np.ascontiguousarray(train[: limit or None])
+        train /= np.linalg.norm(train, axis=1, keepdims=True) + 1e-12
+        test /= np.linalg.norm(test, axis=1, keepdims=True) + 1e-12
+        exact = faiss.IndexFlatIP(train.shape[1])
+        exact.add(train)
+        return train, test, exact.search(test, 10)[1], metric
     with h5py.File(DATA / fname, "r") as f:
         train = np.asarray(f["train"][: limit or None], dtype=np.float32)
         test = np.asarray(f["test"][:n_queries], dtype=np.float32)
@@ -65,8 +99,9 @@ def recall_at_10(found: np.ndarray, truth: np.ndarray) -> float:
 class StrataLib:
     name = "strata"
 
-    def __init__(self, dim, metric, M, efc, heuristic=True):
-        self.index = strata.Index(dim, metric, M=M, ef_construction=efc, use_heuristic=heuristic)
+    def __init__(self, dim, metric, M, efc, heuristic=True, quantization="none", rerank=True):
+        self.index = strata.Index(dim, metric, M=M, ef_construction=efc, use_heuristic=heuristic,
+                                  quantization=quantization, rerank=rerank)
 
     def build(self, x, threads):
         self.index.add(x, num_threads=threads)
@@ -118,16 +153,21 @@ class HnswlibLib:
 class FaissLib:
     name = "faiss"
 
-    def __init__(self, dim, metric, M, efc):
+    def __init__(self, dim, metric, M, efc, sq8=False):
         import faiss
 
         self.faiss = faiss
         m = faiss.METRIC_L2 if metric == "l2" else faiss.METRIC_INNER_PRODUCT
-        self.index = faiss.IndexHNSWFlat(dim, M, m)
+        if sq8:  # 8-bit scalar quantizer, per-dimension min/max like strata-sq8 without rerank
+            self.index = faiss.IndexHNSWSQ(dim, faiss.ScalarQuantizer.QT_8bit, M, m)
+        else:
+            self.index = faiss.IndexHNSWFlat(dim, M, m)
         self.index.hnsw.efConstruction = efc
 
     def build(self, x, threads):
         self.faiss.omp_set_num_threads(threads)
+        if not self.index.is_trained:
+            self.index.train(x)
         self.index.add(x)
 
     def query(self, q, k, ef):
@@ -152,6 +192,14 @@ def make(lib, dim, metric, M, efc):
         return StrataLib(dim, metric, M, efc)
     if lib == "strata-noheuristic":
         obj = StrataLib(dim, metric, M, efc, heuristic=False)
+        obj.name = lib
+        return obj
+    if lib in ("strata-sq8", "strata-sq8-norerank"):
+        obj = StrataLib(dim, metric, M, efc, quantization="sq8", rerank=lib == "strata-sq8")
+        obj.name = lib
+        return obj
+    if lib == "faiss-sq8":
+        obj = FaissLib(dim, metric, M, efc, sq8=True)
         obj.name = lib
         return obj
     if lib == "hnswlib":
@@ -210,6 +258,8 @@ def main():
         print(f"  all-core batch @ef=64: {batch_qps:.0f} qps (recall {recall_at_10(found, truth):.4f})", flush=True)
         out["libs"][name] = {"build_seconds": build_s, "index_bytes": size, "curve": curve,
                              "batch_qps_ef64": batch_qps}
+        if hasattr(lib.index, "stats"):
+            out["libs"][name]["memory_bytes"] = lib.index.stats()["memory_bytes"]
         del lib
 
     RESULTS.mkdir(exist_ok=True)

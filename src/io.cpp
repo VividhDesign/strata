@@ -1,8 +1,11 @@
 #include "strata/io.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -106,6 +109,17 @@ void FileWriter::write(const void* data, size_t n) {
   if (n == 0) return;
   if (std::fwrite(data, 1, n, f_) != n) throw Error("write failed: " + path_ + ": " + errno_message());
   crc_ = crc32_update(crc_, data, n);
+  pos_ += n;
+}
+
+void FileWriter::pad_to(size_t alignment) {
+  static const char zeros[256] = {};
+  size_t n = (alignment - pos_ % alignment) % alignment;
+  while (n > 0) {
+    const size_t c = std::min(n, sizeof(zeros));
+    write(zeros, c);
+    n -= c;
+  }
 }
 
 void FileWriter::write_crc() {
@@ -134,6 +148,24 @@ void FileReader::read(void* data, size_t n) {
   if (n == 0) return;
   if (std::fread(data, 1, n, f_) != n) throw Error("unexpected end of file: " + path_);
   crc_ = crc32_update(crc_, data, n);
+  pos_ += n;
+}
+
+void FileReader::skip_pad(size_t alignment) {
+  char buf[256];
+  size_t n = (alignment - pos_ % alignment) % alignment;
+  while (n > 0) {
+    const size_t c = std::min(n, sizeof(buf));
+    read(buf, c);
+    n -= c;
+  }
+}
+
+void FileReader::absorb(const void* data, size_t n) {
+  if (n == 0) return;
+  if (std::fseek(f_, static_cast<long>(pos_ + n), SEEK_SET) != 0) throw Error("seek failed: " + path_);
+  crc_ = crc32_update(crc_, data, n);
+  pos_ += n;
 }
 
 std::string FileReader::get_string() {
@@ -147,6 +179,36 @@ void FileReader::verify_crc() {
   uint32_t stored = 0;
   if (std::fread(&stored, sizeof(stored), 1, f_) != 1) throw Error("missing checksum: " + path_);
   if (stored != crc_) throw Error("checksum mismatch: " + path_ + " is corrupted");
+}
+
+MappedFile::MappedFile(const std::string& path) {
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) throw Error("cannot open " + path + ": " + errno_message());
+  struct stat st {};
+  if (::fstat(fd, &st) != 0) {
+    ::close(fd);
+    throw Error("cannot stat " + path + ": " + errno_message());
+  }
+  size_ = static_cast<size_t>(st.st_size);
+  if (size_ > 0) {
+    base_ = ::mmap(nullptr, size_, PROT_READ, MAP_SHARED, fd, 0);
+    if (base_ == MAP_FAILED) {
+      base_ = nullptr;
+      ::close(fd);
+      throw Error("cannot mmap " + path + ": " + errno_message());
+    }
+  }
+  ::close(fd);  // the mapping keeps the file referenced
+}
+
+MappedFile::~MappedFile() {
+  if (base_) ::munmap(base_, size_);
+}
+
+void MappedFile::advise_random_and_release() const {
+  if (!base_) return;
+  ::madvise(base_, size_, MADV_DONTNEED);
+  ::madvise(base_, size_, MADV_RANDOM);
 }
 
 }  // namespace strata

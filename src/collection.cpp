@@ -87,6 +87,8 @@ json config_to_json(const CollectionConfig& c) {
           {"ef_construction", c.params.ef_construction},
           {"seed", c.params.seed},
           {"use_heuristic", c.params.use_heuristic},
+          {"quantization", quantization_name(c.params.quantization)},
+          {"rerank", c.params.rerank},
           {"checkpoint_wal_bytes", c.checkpoint_wal_bytes}};
 }
 
@@ -99,6 +101,8 @@ CollectionConfig config_from_json(const json& j) {
   c.params.ef_construction = j.at("ef_construction").get<size_t>();
   c.params.seed = j.at("seed").get<uint64_t>();
   c.params.use_heuristic = j.value("use_heuristic", true);
+  c.params.quantization = parse_quantization(j.value("quantization", std::string("none")));
+  c.params.rerank = j.value("rerank", true);
   c.checkpoint_wal_bytes = j.value("checkpoint_wal_bytes", c.checkpoint_wal_bytes);
   return c;
 }

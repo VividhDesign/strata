@@ -37,6 +37,9 @@ class FileWriter {
     put<uint32_t>(static_cast<uint32_t>(s.size()));
     write(s.data(), s.size());
   }
+  // Writes zero bytes until the file offset is a multiple of `alignment`.
+  void pad_to(size_t alignment);
+  uint64_t position() const { return pos_; }
   // Appends the CRC of all bytes written so far (the CRC itself is not checksummed).
   void write_crc();
   void sync_and_close();
@@ -45,6 +48,7 @@ class FileWriter {
   std::FILE* f_ = nullptr;
   std::string path_;
   uint32_t crc_ = 0;
+  uint64_t pos_ = 0;
 };
 
 class FileReader {
@@ -62,6 +66,12 @@ class FileReader {
     return v;
   }
   std::string get_string();
+  // Skips padding written by FileWriter::pad_to (the bytes still enter the CRC).
+  void skip_pad(size_t alignment);
+  // Adds the next n bytes of the file, already available in memory at `data` (e.g. through a
+  // memory map), to the CRC and moves past them without copying.
+  void absorb(const void* data, size_t n);
+  uint64_t position() const { return pos_; }
   // Reads the stored CRC and throws if it does not match the bytes read so far.
   void verify_crc();
 
@@ -69,6 +79,26 @@ class FileReader {
   std::FILE* f_ = nullptr;
   std::string path_;
   uint32_t crc_ = 0;
+  uint64_t pos_ = 0;
+};
+
+// Read-only memory map of a whole file.
+class MappedFile {
+ public:
+  explicit MappedFile(const std::string& path);
+  ~MappedFile();
+  MappedFile(const MappedFile&) = delete;
+  MappedFile& operator=(const MappedFile&) = delete;
+
+  const char* data() const { return static_cast<const char*>(base_); }
+  size_t size() const { return size_; }
+  // Hints that pages will be read in random order, and drops already-touched pages from this
+  // process's resident set (they stay in the OS page cache).
+  void advise_random_and_release() const;
+
+ private:
+  void* base_ = nullptr;
+  size_t size_ = 0;
 };
 
 }  // namespace strata
