@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -73,9 +74,14 @@ class Collection {
   std::unique_ptr<HNSWIndex> index_;
   MetadataStore meta_;
   std::unique_ptr<WriteAheadLog> wal_;
-  uint64_t seq_ = 0;
-  uint64_t snapshot_seq_ = 0;
-  mutable std::shared_mutex mu_;
+  // Writers (upsert, remove, checkpoint) are serialised by write_mu_ and hold mu_ exclusively
+  // only to update the metadata store and to delete. Vector inserts run under the index's own
+  // concurrency control, so queries are not blocked while a batch is being indexed.
+  std::atomic<uint64_t> seq_{0};
+  std::atomic<uint64_t> snapshot_seq_{0};
+  std::atomic<uint64_t> wal_bytes_{0};
+  mutable std::mutex write_mu_;
+  mutable std::shared_mutex mu_;  // guards meta_ (and index deletes)
 };
 
 }  // namespace strata

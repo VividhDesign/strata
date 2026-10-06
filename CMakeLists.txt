@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(strata VERSION 0.1.0 LANGUAGES CXX)
+project(strata VERSION 0.2.0 LANGUAGES CXX)
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
@@ -77,6 +77,7 @@ if(STRATA_BUILD_TESTS)
     tests/cpp/test_distance.cpp
     tests/cpp/test_hnsw.cpp
     tests/cpp/test_persistence.cpp
+    tests/cpp/test_quantization.cpp
     tests/cpp/test_collection.cpp)
   target_include_directories(strata_tests PRIVATE ${doctest_SOURCE_DIR} tests/cpp)
   target_link_libraries(strata_tests PRIVATE strata)
@@ -96,6 +97,10 @@ endif()
 if(STRATA_BUILD_BENCH)
   add_executable(micro_distance bench/micro_distance.cpp)
   target_link_libraries(micro_distance PRIVATE strata)
+  add_executable(bench_ingest bench/bench_ingest.cpp)
+  target_link_libraries(bench_ingest PRIVATE strata)
+  add_executable(bench_filter bench/bench_filter.cpp)
+  target_link_libraries(bench_filter PRIVATE strata)
 endif()
 
 if(STRATA_BUILD_PYTHON)

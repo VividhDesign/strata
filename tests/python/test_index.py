@@ -139,3 +139,69 @@ def test_gil_is_released_during_search(data):
         t.join()
     for r in results[1:]:
         np.testing.assert_array_equal(r, results[0])
+
+
+@pytest.mark.parametrize("metric", ["l2", "ip", "cosine"])
+def test_sq8_index(tmp_path, metric):
+    rng = np.random.default_rng(5)
+    x = rng.standard_normal((3000, 32)).astype(np.float32)
+    q = rng.standard_normal((50, 32)).astype(np.float32)
+    exact = strata.Index(32, metric)
+    exact.add(x)
+    for rerank in (True, False):
+        index = strata.Index(32, metric, quantization="sq8", rerank=rerank)
+        assert index.quantization == "sq8" and index.rerank == rerank
+        index.add(x)
+        ids, _ = index.search(q, k=10, ef=200)
+        ref, _ = exact.search(q, k=10, ef=200)
+        recall = np.mean([len(set(a) & set(b)) / 10 for a, b in zip(ids, ref)])
+        assert recall >= (0.95 if rerank else 0.85)
+        index.save(str(tmp_path / "q.bin"))
+        loaded = strata.Index.load(str(tmp_path / "q.bin"))
+        assert loaded.quantization == "sq8"
+        np.testing.assert_array_equal(loaded.search(q, k=10, ef=200)[0], ids)
+
+
+def test_sq8_collection(tmp_path):
+    rng = np.random.default_rng(6)
+    x = rng.standard_normal((500, 16)).astype(np.float32)
+    path = str(tmp_path / "c")
+    col = strata.Collection.create(path, dim=16, quantization="sq8")
+    col.upsert(range(500), x)
+    del col
+    col = strata.Collection.open(path)
+    assert col.query(x[:1], k=1)[0][0].id == 0
+
+
+def test_sq8_mmap_vectors(tmp_path):
+    rng = np.random.default_rng(7)
+    x = rng.standard_normal((2000, 32)).astype(np.float32)
+    index = strata.Index(32, "cosine", quantization="sq8")
+    index.add(x)
+    index.save(str(tmp_path / "i.bin"))
+    mapped = strata.Index.load(str(tmp_path / "i.bin"), mmap_vectors=True)
+    np.testing.assert_array_equal(mapped.search(x[:20], k=5)[0], index.search(x[:20], k=5)[0])
+    assert mapped.stats()["memory_bytes"] < index.stats()["memory_bytes"]
+    mapped.add(x[:10], ids=np.arange(10_000, 10_010))  # first write copies the vectors into RAM
+    assert len(mapped) == 2010
+
+
+def test_search_during_add_from_python():
+    rng = np.random.default_rng(8)
+    x = rng.standard_normal((30000, 32)).astype(np.float32)
+    index = strata.Index(32, "l2")
+    index.add(x[:2000])
+    done, answered = threading.Event(), []
+
+    def reader():
+        while not done.is_set():
+            ids, _ = index.search(x[:4], k=1, num_threads=1)
+            assert (ids[:, 0] == np.arange(4)).all()
+            answered.append(1)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    index.add(x[2000:], ids=np.arange(2000, 30000), num_threads=2)  # releases the GIL
+    done.set()
+    t.join()
+    assert len(answered) > 0 and len(index) == 30000

@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "strata-vdb"
-version = "0.1.0"
+version = "0.2.0"
 description = "An HNSW vector database written from scratch in C++ with Python bindings"
 readme = "README.md"
 license = { text = "MIT" }

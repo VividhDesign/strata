@@ -82,12 +82,15 @@ PYBIND11_MODULE(_strata, m) {
 
   py::class_<HNSWIndex>(m, "Index")
       .def(py::init([](size_t dim, const std::string& metric, size_t M, size_t ef_construction, uint64_t seed,
-                       bool use_heuristic, size_t capacity) {
-             return std::make_unique<HNSWIndex>(dim, parse_metric(metric),
-                                                HNSWParams{M, ef_construction, seed, use_heuristic}, capacity);
+                       bool use_heuristic, size_t capacity, const std::string& quantization, bool rerank) {
+             HNSWParams p{M, ef_construction, seed, use_heuristic};
+             p.quantization = parse_quantization(quantization);
+             p.rerank = rerank;
+             return std::make_unique<HNSWIndex>(dim, parse_metric(metric), p, capacity);
            }),
            py::arg("dim"), py::arg("metric") = "l2", py::arg("M") = 16, py::arg("ef_construction") = 200,
-           py::arg("seed") = 42, py::arg("use_heuristic") = true, py::arg("capacity") = 1024)
+           py::arg("seed") = 42, py::arg("use_heuristic") = true, py::arg("capacity") = 1024,
+           py::arg("quantization") = "none", py::arg("rerank") = true)
       .def(
           "add",
           [](HNSWIndex& self, const FloatArray& vectors, const py::object& ids, int num_threads) {
@@ -154,17 +157,22 @@ PYBIND11_MODULE(_strata, m) {
           py::arg("path"))
       .def_static(
           "load",
-          [](const std::string& path) {
+          [](const std::string& path, bool mmap_vectors) {
             py::gil_scoped_release release;
-            return HNSWIndex::load(path);
+            return HNSWIndex::load(path, mmap_vectors);
           },
-          py::arg("path"))
+          py::arg("path"), py::arg("mmap_vectors") = false,
+          "Load a saved index. mmap_vectors=True keeps the float32 re-rank vectors of an SQ8 index "
+          "on disk (memory-mapped) instead of in RAM.")
       .def_property("ef_search", &HNSWIndex::ef_search, &HNSWIndex::set_ef_search)
       .def_property("flat_search_cutoff", &HNSWIndex::flat_search_cutoff, &HNSWIndex::set_flat_search_cutoff)
       .def_property_readonly("dim", &HNSWIndex::dim)
       .def_property_readonly("metric", [](const HNSWIndex& self) { return metric_name(self.metric()); })
       .def_property_readonly("M", [](const HNSWIndex& self) { return self.params().M; })
       .def_property_readonly("ef_construction", [](const HNSWIndex& self) { return self.params().ef_construction; })
+      .def_property_readonly("quantization",
+                             [](const HNSWIndex& self) { return quantization_name(self.params().quantization); })
+      .def_property_readonly("rerank", [](const HNSWIndex& self) { return self.params().rerank; })
       .def("stats", [](const HNSWIndex& self) {
         const HNSWStats s = self.stats();
         py::dict d;
@@ -218,18 +226,21 @@ PYBIND11_MODULE(_strata, m) {
       .def_static(
           "create",
           [](const std::string& path, size_t dim, const std::string& metric, size_t M, size_t ef_construction,
-             bool sync_wal) {
+             bool sync_wal, const std::string& quantization, bool rerank) {
             CollectionConfig cfg;
             cfg.name = path;
             cfg.dim = dim;
             cfg.metric = parse_metric(metric);
             cfg.params.M = M;
             cfg.params.ef_construction = ef_construction;
+            cfg.params.quantization = parse_quantization(quantization);
+            cfg.params.rerank = rerank;
             cfg.sync_wal = sync_wal;
             return Collection::create(path, cfg);
           },
           py::arg("path"), py::arg("dim"), py::arg("metric") = "cosine", py::arg("M") = 16,
-          py::arg("ef_construction") = 200, py::arg("sync_wal") = true)
+          py::arg("ef_construction") = 200, py::arg("sync_wal") = true, py::arg("quantization") = "none",
+          py::arg("rerank") = true)
       .def_static("open", &Collection::open, py::arg("path"), py::arg("sync_wal") = true)
       .def(
           "upsert",

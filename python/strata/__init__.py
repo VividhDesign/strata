@@ -38,8 +38,9 @@ class Collection:
 
     @classmethod
     def create(cls, path: str, dim: int, metric: str = "cosine", M: int = 16,
-               ef_construction: int = 200, sync_wal: bool = True) -> "Collection":
-        return cls(_Collection.create(path, dim, metric, M, ef_construction, sync_wal))
+               ef_construction: int = 200, sync_wal: bool = True, quantization: str = "none",
+               rerank: bool = True) -> "Collection":
+        return cls(_Collection.create(path, dim, metric, M, ef_construction, sync_wal, quantization, rerank))
 
     @classmethod
     def open(cls, path: str, sync_wal: bool = True) -> "Collection":

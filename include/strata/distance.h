@@ -16,6 +16,14 @@ float dot_scalar(const float* a, const float* b, size_t dim);
 float l2sq(const float* a, const float* b, size_t dim);
 float dot(const float* a, const float* b, size_t dim);
 
+// 8-bit scalar quantization (SQ8). `c` holds one uint8 code per dimension.
+//   sq8_l2:  sum_i w[i] * (q[i] - c[i])^2   (q already shifted/scaled into code space)
+//   sq8_dot: sum_i q[i] * c[i]
+float sq8_l2_scalar(const float* q, const float* w, const uint8_t* c, size_t dim);
+float sq8_dot_scalar(const float* q, const uint8_t* c, size_t dim);
+float sq8_l2(const float* q, const float* w, const uint8_t* c, size_t dim);
+float sq8_dot(const float* q, const uint8_t* c, size_t dim);
+
 // "neon", "avx2" or "scalar".
 const char* simd_backend();
 

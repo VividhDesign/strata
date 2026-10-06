@@ -74,6 +74,38 @@ upper levels, separate per-node array (rare: ~1/M of nodes):
 - While scanning a neighbour list we `__builtin_prefetch` the *next* neighbour's vector.
   This hides DRAM latency behind the current distance computation.
 
+### Scalar quantization (`quantization="sq8"`)
+
+With SQ8 the vector in the level-0 block is replaced by **one byte per dimension**:
+
+```
+  [neighbour count: u32][neighbour ids: u32 × 2M][pad to 16 B][codes: u8 × d][pad to 16 B]
+```
+
+For d = 128 and M = 16 a block shrinks from 656 to 272 bytes. Search is memory-bound, so the
+traversal touches 2.4× fewer cache lines.
+
+- **Codebook.** Each dimension gets its own range: `x ≈ min_d + scale_d · c`, with
+  `scale_d = (max_d − min_d) / 255`. The range is trained on the first batch. While the index holds
+  fewer than 1,000 vectors, every later batch widens the range and re-encodes the existing codes.
+  Without this, one-by-one upserts would freeze a degenerate range taken from the first vector
+  (I caught this with a test: recall dropped to 0.50). After that the ranges are frozen and outliers are clamped.
+- **Asymmetric distances.** The query stays float. It is transformed once per search, so every
+  candidate needs only a widen-and-FMA:
+  - L2: `Σ scale_d² · ((q_d − min_d)/scale_d − c_d)²`
+  - IP and cosine: `1 − ⟨q, min⟩ − Σ (q_d · scale_d) · c_d`
+
+  The kernels (`kernels::sq8_l2`, `kernels::sq8_dot`) widen u8 → f32 in registers: AVX2 uses
+  `cvtepu8_epi32`, NEON uses `vmovl_u8 → vmovl_u16 → vcvtq_f32_u32`. They keep the same multi-accumulator
+  structure as the float kernels. The NEON path was checked against the scalar kernel on x86 through
+  the NEON_2_SSE emulation header.
+- **`rerank=True` (default).** The float vectors are also kept, in a separate cold array outside the
+  graph blocks. The graph is **built** with exact float distances, so it is identical to the float index.
+  Queries walk the graph on codes and then re-rank the `ef` candidates with exact distances. Recall
+  matches the float index and the returned distances are exact.
+- **`rerank=False`.** The float vectors are dropped once the ranges freeze. The index is about 3× smaller,
+  the graph is built on codes and distances are approximate.
+
 ## 5. Distance kernels (`src/distance.cpp`)
 
 Without `-ffast-math` the compiler won't reorder a float sum, so a plain `sum += a[i]*b[i]`
@@ -91,29 +123,49 @@ Metrics:
 ## 6. Concurrency model
 
 - **Reads**: `search` takes a `std::shared_mutex` in shared mode, so any number of queries
-  run in parallel. They read the graph **without per-node locks**, because no writer can be
-  active.
-- **Writes**: `add` takes the lock exclusively and then **parallelises internally**: worker
-  threads insert different vectors at the same time. They coordinate with:
-  - a **1-byte spinlock per node** (`SpinLock`, `include/strata/sync.h`) guarding that
-    node's neighbour lists. `std::mutex` is 64 bytes on macOS, so a 1M-node index would
-    spend 64 MB on locks. Spinlocks cost 1 MB, and the critical sections are a copy of
-    ≤ 2M ints;
-  - a mutex for the label → node map;
-  - a mutex for the entry point, held for the whole insertion only by a node that becomes
-    the new top level (rare).
+  run in parallel. When no insert is in flight, they read the graph **without per-node
+  locks**.
+- **Writes** are serialised by a writer mutex. `add` runs in two phases:
+  1. **Exclusive, short.** Deduplicate the batch and tombstone upserted labels. Grow the
+     arrays if needed (the only step that moves memory). Assign node ids and levels, store the
+     vectors (in parallel) and update the label map. This is O(n·d) memory writes: about 80 ms
+     for 100k × 96-d vectors.
+  2. **Shared, long.** Link the new nodes into the graph, with worker threads inserting
+     different vectors at the same time. **Queries keep running during this phase.** The
+     threads coordinate with:
+     - a **1-byte spinlock per node** (`SpinLock`, `include/strata/sync.h`) guarding that
+       node's neighbour lists. `std::mutex` is 64 bytes on macOS, so a 1M-node index would
+       spend 64 MB on locks. Spinlocks cost 1 MB, and the critical sections are a copy of
+       ≤ 2M ints;
+     - a mutex for the entry point, held for the whole insertion only by a node that becomes
+       the new top level (rare).
+- **Reads during phase 2**: an atomic `linking_` flag tells a query to copy each neighbour
+  list under its node's spinlock (and to read the entry point under its mutex). This is the
+  same discipline the inserting threads use. The flag is only set while the exclusive lock is
+  held, so a query that read `false` under the shared lock cannot overlap a linking phase. The
+  common, write-free path therefore pays nothing. A new vector is visible to filtered
+  brute-force search and `get_vector` after phase 1, and to graph search once it is linked.
+- **Collections**: `upsert` takes the collection's writer mutex, appends to the WAL, updates
+  the metadata store under a brief exclusive lock, then calls `add` without holding the
+  collection lock. Checkpoints take only the writer mutex: readers and the snapshot writer
+  both only read.
+- **Measured** (`bench/bench_ingest`): inserting 100k vectors into a 100k index takes ~18 s.
+  Before this change, a concurrent query thread got **2** answers, one after an 18.4 s wait. Now it gets
+  **~81,000** answers with p50 0.20 ms and p99 0.43 ms. The worst case, ~80 ms, is phase 1.
+  Insert throughput is unchanged.
 - **Deadlock freedom**: a node being inserted holds its own lock while it links, and takes
   neighbour locks one at a time. Two inserting nodes cannot wait on each other. For A to
   link to B, B must already have been reachable when A's search ran, which means B had
-  finished searching earlier. That ordering cannot hold in both directions at once.
+  finished searching earlier. That ordering cannot hold in both directions at once. Queries
+  hold at most one spinlock at a time and never while waiting on the entry mutex.
 - **Deterministic levels**: a node's level is `hash(seed, label)`, not a shared RNG. That
   makes it thread-safe with no lock, and reproducible.
 - **Verification**: the test suite passes under ThreadSanitizer and AddressSanitizer
-  (`-DSTRATA_SANITIZE=thread|address`).
+  (`-DSTRATA_SANITIZE=thread|address`). That includes tests where reader threads query, and
+  read stats, while a 20k-vector batch is linked, for both float32 and SQ8 indexes.
 
-Trade-off: writes block reads for the duration of a batch. Production systems such as
-Milvus/Lucene avoid that with immutable segments plus a small mutable segment that is
-merged in the background. That is the natural next step (see §10).
+Remaining trade-offs: `remove` takes the exclusive lock (it is O(1)), and so does `compact`,
+which rebuilds the graph. Immutable segments merged in the background would remove that too.
 
 ## 7. Deletes and upserts
 
@@ -131,10 +183,36 @@ Filters (metadata, or explicit allow/deny id lists) are applied **during** the g
 Filtered-out nodes are traversed but never returned. Post-filtering (search, then drop) can
 return fewer than k results.
 
-When the allowed set is very small, a filtered graph walk wastes time visiting nodes that
-cannot qualify. Below `flat_search_cutoff` allowed ids (default 2048), Strata instead
-**brute-forces over the allowed set**, which is exact and cheaper at that size. This is the
-same planner decision Qdrant and Weaviate make.
+**When to brute-force instead.** A filtered walk must keep exploring until it has collected `ef` allowed
+nodes, so it visits roughly `ef / s` nodes for selectivity `s`, each costing a neighbour scan. Brute force
+over the allowed set costs `s · n` distance computations. Equating the two gives a crossover that grows
+with the square root of the index size:
+
+```
+brute force  if  |allowed| <= sqrt(c · ef · n),   c ≈ M0 / 2   (M0 = 2M level-0 neighbours)
+```
+
+I calibrated `c` with `bench/bench_filter` (200k × 96-d). The walk and the scan cross at ~7% selectivity
+for ef=64, which gives `c ≈ 16` for M=16, about half of M0. At 1M vectors the crossover falls to ~3%. A fixed floor
+(`flat_search_cutoff`, default 2048 labels) still applies. Qdrant and Weaviate make the same decision with a
+fixed threshold. The fixed threshold was the problem: at 200k vectors and 2% selectivity, Strata walked the graph at
+125–316 QPS where brute force runs at 2,100–3,100 QPS, with recall 1.0 either way.
+
+**Making the scan fast.** Allowed labels are scattered across the index, so the scan is dominated by
+memory latency, not arithmetic. It resolves labels through an open-addressing hash table with software
+prefetch (16 B per slot, ~14 ns per lookup, vs ~170 ns for the node-based `std::unordered_map` it
+replaced), sorts the node ids so vectors are read in address order, and prefetches 8 nodes ahead.
+
+**Tried and rejected: two-hop traversal.** ACORN-1 (Patel et al., SIGMOD 2024) skips distance
+computations for nodes that fail the filter and looks through them to their neighbours instead. On this
+data it was 2–3× *slower* at high selectivity (more neighbour-list reads per useful distance) and lost
+recall at low selectivity (0.935 at 1%), where the brute-force path is exact and 50× faster anyway. The
+cost-based planner gets the benefit without changing the graph.
+
+**Small indexes.** If `ef` is at least the number of live vectors, the walk would visit everything anyway,
+so Strata scans exactly. This also covers a real HNSW corner case. Parallel construction can leave a node
+with no inbound links (its neighbours pruned it), and a walk can then never return it. The original code
+showed this in 2 of 3,000 tiny parallel builds (110 of 3,000 under ASan's slower timing).
 
 ## 9. Durability (`src/collection.cpp`, `src/wal.cpp`)
 
@@ -167,9 +245,11 @@ collection/
 
 ## 10. What I would do next
 
-- **Product quantization / int8 scalar quantization**: cut memory 4-32× and rerank with
-  full-precision vectors.
-- **Segments**: an immutable HNSW plus a small mutable buffer, so writes never block
-  reads.
+- **Product quantization / RaBitQ**: int8 scalar quantization is done (section 4). PQ or 1-bit
+  RaBitQ codes would cut memory a further 4–8×.
+- **Out-of-core rerank vectors**: with SQ8 the float vectors are only read for the final rerank.
+  They could live in an mmap'd file while codes and graph stay in RAM.
+- **Segments**: inserts no longer block reads (section 6), but `compact` still does.
+  Immutable segments merged in the background would fix that and make compaction incremental.
 - **mmap-able snapshots** for instant startup on large indexes.
 - **Replication**: ship the WAL to followers.

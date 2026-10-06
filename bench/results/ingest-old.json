@@ -1,0 +1,1 @@
+{"base": 100000, "extra": 100000, "dim": 96, "insert_threads": 3, "insert_seconds": 17.302, "queries_during_insert": 2, "p50_us": 17301957.4, "p99_us": 17301957.4, "max_us": 17301957.4}
