@@ -32,8 +32,9 @@ durable. It also serves as the retrieval engine of my RAG project, [Evident](htt
 | Area | What is implemented |
 |---|---|
 | Index | HNSW (Malkov & Yashunin) with the neighbour-selection heuristic; L2, inner product, cosine |
+| Compression | 8-bit scalar quantization (SQ8) with exact float re-ranking; re-rank vectors can stay on disk (mmap) |
 | Speed | NEON (ARM64) and AVX2+FMA (x86-64) distance kernels, cache-friendly node layout, software prefetch, pooled visited lists |
-| Concurrency | Parallel inserts with 1-byte per-node spinlocks; lock-free concurrent reads; verified with ThreadSanitizer |
+| Concurrency | Parallel inserts with 1-byte per-node spinlocks; queries keep running while a batch is inserted; lock-free reads otherwise; verified with ThreadSanitizer |
 | Data ops | Upsert, delete (tombstones), compaction, exact brute-force `FlatIndex` |
 | Filtering | Allow/deny id lists and Mongo-style metadata filters (`$eq $ne $in $nin $and $or`) with an inverted index; automatic brute-force fallback for very selective filters |
 | Durability | Write-ahead log with CRC-32 records, atomic snapshots (`CURRENT` pointer + rename), crash recovery that tolerates torn writes, `F_FULLFSYNC` on macOS |
@@ -59,6 +60,13 @@ index.add(np.random.rand(100_000, 384).astype("float32"))             # parallel
 ids, distances = index.search(np.random.rand(5, 384).astype("float32"), k=10, ef=128)
 index.search(queries, k=10, filter_ids=allowed_ids)                     # or exclude_ids=...
 index.remove([3, 4]); index.compact(); index.save("index.bin")
+
+# 8-bit quantization: the graph stores 1 byte per dimension; the top ef candidates are re-ranked
+# with the float vectors, so recall matches the float index. mmap_vectors keeps those on disk.
+sq8 = strata.Index(dim=384, metric="cosine", quantization="sq8")
+sq8.add(vectors); sq8.save("sq8.bin")
+served = strata.Index.load("sq8.bin", mmap_vectors=True)                # only graph + codes in RAM
+tiny = strata.Index(dim=384, metric="cosine", quantization="sq8", rerank=False)  # codes only, ~2-3x smaller
 
 # Durable collection with metadata filters (WAL + snapshots on disk)
 col = strata.Collection.create("./my-collection", dim=384)
@@ -141,6 +149,58 @@ throughput is compared **at equal recall@10**.
 </picture>
 </p>
 
+### x86: quantization, memory, concurrent writes and filters
+
+Measured on a **4-vCPU cloud VM (Intel Xeon @ 2.8 GHz, AVX2)** with `bench/bench_ann.py`, `bench/bench_memory.py`,
+`bench/bench_ingest` and `bench/bench_filter`. The dataset is GloVe-6B (Wikipedia + Gigaword, 400k words), with 5,000
+held-out words as queries. Raw JSON is in `bench/results/`. QPS varies by about ±15% between runs on this VM, so
+compare rows from the same table.
+
+**GloVe-6B 300-d** (395k vectors, cosine, M=16, efC=200, one query thread):
+
+| Library | Build (s) | Index file (MiB) | QPS @ R≥0.70 | QPS @ R≥0.80 | QPS @ R≥0.85 | All-core QPS (ef=64) |
+|---|---:|---:|---:|---:|---:|---:|
+| Strata float32 | 183 | 513 | 1,594 | 597 | 339 | 6,699 |
+| **Strata SQ8 + rerank** | 180 | 627 | **2,494** | **853** | **480** | 9,045 |
+| **Strata SQ8 (codes only)** | 191 | **175** | **2,681** | **964** | **532** | **10,708** |
+| FAISS `IndexHNSWFlat` | 174 | 506 | 1,722 | 646 | 476 | 4,840 |
+| FAISS `IndexHNSWSQ` (8-bit) | 495 | 167 | 627 | 233 | 125 | 2,154 |
+| hnswlib | 169 | 508 | 1,667 | 618 | 358 | 7,018 |
+
+- SQ8 with re-ranking keeps float recall (0.8888 vs 0.8885 at ef=512) and is 43–56% faster than float32. At 300
+  dimensions the traversal is memory-bound and the codes are 4× smaller. At 100 dimensions the two run at the same speed.
+- Against FAISS's 8-bit HNSW at the same code size, Strata is ~4× faster per query and builds 2.6× faster.
+- FAISS `IndexHNSWFlat` is slightly ahead of Strata float32 here at high recall (476 vs 339 QPS at R≥0.85).
+
+**Resident memory** (same data, ef=128, fresh process per row):
+
+| Configuration | Non-reclaimable RAM | Recall@10 | QPS |
+|---|---:|---:|---:|
+| float32 | 537 MiB | 0.7945 | 905 |
+| SQ8 + rerank | 652 MiB | 0.7955 | 1,208 |
+| **SQ8 + rerank, `Index.load(path, mmap_vectors=True)`** | **197 MiB** | **0.7955** | **1,378** |
+| SQ8, codes only | 197 MiB | 0.7904 | 1,039 |
+
+With memory-mapped re-rank vectors, the graph and codes are the only private memory. The float vectors (456 MiB touched
+here) live in the OS page cache, which the kernel can reclaim under pressure.
+
+**Queries during a large insert** (`bench/bench_ingest`: 100k vectors inserted into a 100k index, 96-d, 3 insert
+threads, one query thread):
+
+| | Queries answered during the ~18 s insert | p50 | p99 |
+|---|---:|---:|---:|
+| before (insert held the index lock) | 2 | 17.3 s | 17.3 s |
+| **now** | **81,561** | **0.19 ms** | **0.46 ms** |
+
+**Filtered search** (`bench/bench_filter`: 200k × 96-d, allow-list filters, recall@10 = 1.0 for every row below,
+ef=64 / 128):
+
+| Selectivity | Graph walk only (old behaviour above 2,048 labels) | Cost-based planner (now) |
+|---|---:|---:|
+| 5% | 576 / 397 QPS | 1,430 / 1,423 QPS |
+| 2% | 316 / 125 QPS | 2,136 / 3,120 QPS |
+| 1% | brute force, 4,171 QPS | 7,175 / 7,090 QPS (faster scan) |
+
 ### HTTP server (200k SIFT vectors, ef=64, keep-alive)
 
 | Load generator | Concurrency | Throughput | p50 | p99 |
@@ -220,9 +280,9 @@ docs/DESIGN.md    how it works and why
 
 ## Limitations and next steps
 
-- Writes block reads for the duration of a batch. The fix is segment-based storage: immutable HNSW segments plus
-  a small mutable buffer.
-- No vector compression yet. Product or scalar quantization would cut memory 4-32×.
+- `compact()` still blocks reads while it rebuilds the graph. Inserts no longer do. Segment-based storage
+  (immutable HNSW segments merged in the background) would fix compaction too.
+- Quantization is 8-bit scalar only. Product quantization or 1-bit RaBitQ codes would cut memory a further 4–8×.
 - Single node. The WAL is the natural replication log for followers.
 
 ## License
