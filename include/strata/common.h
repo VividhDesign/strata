@@ -8,7 +8,7 @@
 
 namespace strata {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = "0.2.0";
 
 // External, user-facing identifier of a vector.
 using label_t = uint64_t;
