@@ -269,9 +269,10 @@ The suite passes cleanly under **ThreadSanitizer** and **AddressSanitizer**.
 
 ### Cross-library correctness
 
-Strata also passes all 33 checks of **annfuzz**, a property-based suite run with identical checks against seven ANN
-libraries. The checks cover valid and correctly-scored results, deletes, upserts, save/load, filters, NaN input and
-reachability of duplicate vectors. In the November 2026 run, Strata and Annoy were the only two with no findings.
+Strata also passes all 31 checks that apply to it in **annfuzz**, a property-based suite run with identical checks
+against seven ANN libraries. The checks cover valid and correctly-scored results, deletes, upserts, save/load, filters, NaN input and
+reachability of duplicate vectors. In the November 2026 run, Strata and Annoy were the only two with no findings, and only Strata and hnswlib had all 31
+checks apply.
 hnswlib and Voyager return a NaN row in 45–65% of unrelated queries. FAISS HNSW, USearch and PyNNDescent lose copies
 of duplicated vectors, and in FAISS a query near them returns 154 results for k=300.
 
