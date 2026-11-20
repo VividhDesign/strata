@@ -89,6 +89,36 @@ TEST_CASE("empty index and k = 0") {
   CHECK(index.search(q, 3).size() == 1);
 }
 
+TEST_CASE("NaN and infinite vectors and queries are refused, and a refused batch changes nothing") {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  for (const Metric metric : {Metric::L2, Metric::InnerProduct, Metric::Cosine}) {
+    HNSWIndex index(4, metric);
+    FlatIndex flat(4, metric);
+    const float good[8] = {1, 2, 3, 4, 4, 3, 2, 1};
+    const label_t labels[2] = {1, 2};
+    index.add(good, labels, 2);
+    flat.add(good, labels, 2);
+    for (const float bad_value : {nan, inf, -inf}) {
+      // the bad row is second, so a partial insert would have kept the first
+      const float batch[8] = {5, 5, 5, 5, 1, bad_value, 1, 1};
+      const label_t batch_labels[2] = {3, 4};
+      CHECK_THROWS_AS(index.add(batch, batch_labels, 2), Error);
+      CHECK_THROWS_AS(flat.add(batch, batch_labels, 2), Error);
+      CHECK(index.size() == 2);
+      CHECK(flat.size() == 2);
+      CHECK_FALSE(index.contains(3));
+      const float query[4] = {bad_value, 0, 0, 0};
+      CHECK_THROWS_AS(index.search(query, 1), Error);
+      CHECK_THROWS_AS(flat.search(query, 1), Error);
+      label_t out_labels[2];
+      float out_distances[2];
+      CHECK_THROWS_AS(index.search_batch(query, 1, 2, 0, 1, nullptr, out_labels, out_distances), Error);
+    }
+    CHECK(index.search(good, 1)[0].label == 1);
+  }
+}
+
 TEST_CASE("upsert replaces the vector for an existing label") {
   HNSWIndex index(2, Metric::L2);
   const float a[2] = {0, 0};

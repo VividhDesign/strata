@@ -216,6 +216,7 @@ void HNSWIndex::add(const float* vectors, const label_t* labels, size_t n, int n
   for (size_t i = 0; i < n; ++i) {
     if (labels[i] == kNoLabel) throw Error("label 2^64-1 is reserved");
   }
+  check_finite(vectors, n, dim_, "vector");
   std::lock_guard<std::mutex> writer(write_mu_);
   std::vector<size_t> order;
   std::vector<node_t> nodes;
@@ -566,6 +567,7 @@ void HNSWIndex::search_layer_query(const Query& q, node_t ep, size_t ef, const L
 
 std::vector<SearchResult> HNSWIndex::search(const float* query, size_t k, size_t ef,
                                             const LabelFilter* filter) const {
+  check_finite(query, 1, dim_, "query");
   std::shared_lock<std::shared_mutex> read_lock(rw_);
   return search_unlocked(query, k, ef, filter);
 }
@@ -718,6 +720,7 @@ std::vector<SearchResult> HNSWIndex::brute_force(const Query& q, size_t k, const
 
 void HNSWIndex::search_batch(const float* queries, size_t nq, size_t k, size_t ef, int num_threads,
                              const LabelFilter* filter, label_t* out_labels, float* out_distances) const {
+  check_finite(queries, nq, dim_, "query");
   std::shared_lock<std::shared_mutex> read_lock(rw_);
   parallel_for(nq, num_threads, [&](size_t i) {
     const auto res = search_unlocked(queries + i * dim_, k, ef, filter);

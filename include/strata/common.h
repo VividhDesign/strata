@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -37,5 +38,17 @@ class Error : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
 };
+
+// Throws unless all n rows of dim floats are finite. A NaN or infinite component makes every
+// distance to its row NaN or infinite, and those compare false both ways: inserted, such a row
+// corrupts the candidate order during graph construction and gets returned in other queries'
+// results; as a query, it returns arbitrary results. `what` names a row in the message.
+inline void check_finite(const float* rows, size_t n, size_t dim, const char* what) {
+  for (size_t i = 0; i < n * dim; ++i) {
+    if (!std::isfinite(rows[i])) {
+      throw Error(std::string(what) + " " + std::to_string(i / dim) + " has a NaN or infinite component");
+    }
+  }
+}
 
 }  // namespace strata

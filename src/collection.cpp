@@ -196,6 +196,7 @@ void Collection::upsert(const label_t* ids, const float* vectors, size_t n, cons
   for (size_t i = 0; i < n; ++i) {
     if (ids[i] == kNoLabel) throw Error("id 2^64-1 is reserved");
   }
+  check_finite(vectors, n, cfg_.dim, "vector");
   std::lock_guard<std::mutex> writer(write_mu_);
   const uint64_t seq = seq_.load() + 1;
   wal_->append(seq, WriteAheadLog::Op::Upsert, encode_upsert(ids, vectors, n, cfg_.dim, metadata));

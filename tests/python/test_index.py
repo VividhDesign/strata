@@ -123,6 +123,36 @@ def test_input_validation():
     assert len(index) == 2
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("metric", ["l2", "ip", "cosine"])
+def test_non_finite_vectors_and_queries_are_refused(tmp_path, metric, bad):
+    rng = np.random.default_rng(0)
+    data = rng.standard_normal((200, 8)).astype(np.float32)
+    data /= np.linalg.norm(data, axis=1, keepdims=True)  # so each row is its own nearest under ip too
+    index = strata.Index(8, metric=metric)
+    index.add(data)
+    rows = rng.standard_normal((3, 8)).astype(np.float32)
+    rows[2, 5] = bad
+    with pytest.raises(strata.StrataError, match="vector 2 has a NaN or infinite component"):
+        index.add(rows, ids=[1000, 1001, 1002])
+    assert len(index) == 200 and 1000 not in index  # the batch is all or nothing
+    with pytest.raises(strata.StrataError, match="query 0"):
+        index.search(rows[2:], k=3)
+    ids, _ = index.search(data[:50], k=1)
+    assert (ids[:, 0] == np.arange(50)).mean() > 0.95
+
+    flat = strata.FlatIndex(8, metric=metric)
+    with pytest.raises(strata.StrataError):
+        flat.add(rows)
+
+    col = strata.Collection.create(str(tmp_path / "col"), dim=8, metric=metric)
+    with pytest.raises(strata.StrataError):
+        col.upsert(ids=[1, 2, 3], vectors=rows, metadata=[{}, {}, {}])
+    assert len(col) == 0
+    reopened = strata.Collection.open(str(tmp_path / "col"))  # nothing reached the WAL
+    assert len(reopened) == 0
+
+
 def test_gil_is_released_during_search(data):
     x, q = data
     index = strata.Index(48)

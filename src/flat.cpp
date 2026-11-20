@@ -12,6 +12,7 @@ FlatIndex::FlatIndex(size_t dim, Metric metric) : dim_(dim), metric_(metric), di
 }
 
 void FlatIndex::add(const float* vectors, const label_t* labels, size_t n) {
+  check_finite(vectors, n, dim_, "vector");
   const size_t offset = data_.size();
   data_.insert(data_.end(), vectors, vectors + n * dim_);
   labels_.insert(labels_.end(), labels, labels + n);
@@ -21,6 +22,7 @@ void FlatIndex::add(const float* vectors, const label_t* labels, size_t n) {
 }
 
 std::vector<SearchResult> FlatIndex::search(const float* query, size_t k, const LabelFilter* filter) const {
+  check_finite(query, 1, dim_, "query");
   std::vector<float> normalized;
   const float* q = query;
   if (metric_ == Metric::Cosine) {
@@ -49,6 +51,7 @@ std::vector<SearchResult> FlatIndex::search(const float* query, size_t k, const 
 
 void FlatIndex::search_batch(const float* queries, size_t nq, size_t k, int num_threads,
                              const LabelFilter* filter, label_t* out_labels, float* out_distances) const {
+  check_finite(queries, nq, dim_, "query");
   parallel_for(nq, num_threads, [&](size_t i) {
     const auto res = search(queries + i * dim_, k, filter);
     for (size_t j = 0; j < k; ++j) {

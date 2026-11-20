@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **NaN and infinite values are refused.** `Index.add`, `FlatIndex.add` and `Collection.upsert` raise `StrataError`
+  ("vector 2 has a NaN or infinite component") before changing anything, so a batch is all or nothing and a bad
+  vector never reaches the WAL; searches raise for such a query. Previously a NaN row was accepted: it was returned
+  in other queries' top-10 (in 10 of 200 queries under cosine) and cost unrelated vectors their self-match
+  (1000 → 966 of 1000 under L2). A WAL written by an earlier version that holds such a vector now fails to replay.
+
 ## 0.2.0
 
 ### Added
