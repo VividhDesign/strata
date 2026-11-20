@@ -248,8 +248,8 @@ replay WAL records newer than it → truncate any torn tail**. Full details in [
 ## Tests
 
 ```bash
-cmake -S . -B build -G Ninja && cmake --build build && ./build/strata_tests   # 27 cases, 6,511 assertions
-pip install ".[test]" && pytest                                                # 13 Python tests
+cmake -S . -B build -G Ninja && cmake --build build && ./build/strata_tests   # 40 cases, 155,238 assertions
+pip install ".[test]" && pytest                                                # 28 Python tests
 cmake -S . -B build-tsan -DSTRATA_SANITIZE=thread && cmake --build build-tsan && ./build-tsan/strata_tests
 cmake -S . -B build-asan -DSTRATA_SANITIZE=address && cmake --build build-asan && ./build-asan/strata_tests
 ```
@@ -262,9 +262,18 @@ The tests cover:
 - byte-for-byte save/load round trips, and rejection of flipped or truncated files;
 - WAL replay with torn and corrupted tails;
 - crash recovery of a collection from WAL only and from snapshot + WAL;
-- auto-checkpointing.
+- auto-checkpointing;
+- refusal of NaN and infinite vectors and queries, with a refused batch leaving the index and WAL untouched.
 
 The suite passes cleanly under **ThreadSanitizer** and **AddressSanitizer**.
+
+### Cross-library correctness
+
+Strata also passes all 33 checks of **annfuzz**, a property-based suite run with identical checks against seven ANN
+libraries. The checks cover valid and correctly-scored results, deletes, upserts, save/load, filters, NaN input and
+reachability of duplicate vectors. In the November 2026 run, Strata and Annoy were the only two with no findings.
+hnswlib and Voyager return a NaN row in 45–65% of unrelated queries. FAISS HNSW, USearch and PyNNDescent lose copies
+of duplicated vectors, and in FAISS a query near them returns 154 results for k=300.
 
 ## Project layout
 
